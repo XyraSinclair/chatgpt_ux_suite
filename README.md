@@ -1,16 +1,19 @@
 # ChatGPT UX Suite
 
-A Chrome extension that enhances your ChatGPT experience with productivity features.
+ChatGPT UX Suite is a browser extension that adds small, fast UX upgrades to ChatGPT (token counter, rapid prompt navigation, context export, session time tracking, styling tweaks, and a completion chime).
+
+- Chrome Web Store: [ChatGPT UX Suite](https://chromewebstore.google.com/detail/chatgpt-ux-suite/nlecdlfghppkoghjgjbgihhfjbdmckao)
+- Supported sites: `https://chatgpt.com/*` and `https://chat.openai.com/*`
 
 ## Features
 
-### 1. Token Counter
+### 1. Token Counter (estimate)
 Displays an estimated token count for the current conversation, helping you track context usage in real-time.
 
 ### 2. Rapid Prompt Navigation
 Quickly navigate between user prompts using keyboard shortcuts:
-- **Jump to Previous Prompt:** `Alt+E`
-- **Jump to Next Prompt:** `Alt+D`
+- **Jump to Previous Prompt:** `Alt+E` (configurable)
+- **Jump to Next Prompt:** `Alt+D` (configurable)
 
 ### 3. Response Styling
 Adds custom styling to improve readability:
@@ -36,19 +39,39 @@ Play a chime when ChatGPT completes a response:
 ## Installation
 
 ### From Chrome Web Store
-*(Coming soon)*
+Install from the Chrome Web Store (recommended):
 
-### From Source
+[ChatGPT UX Suite](https://chromewebstore.google.com/detail/chatgpt-ux-suite/nlecdlfghppkoghjgjbgihhfjbdmckao)
+
+### From Source (Chrome / Chromium)
 1. Clone or download this repository
 2. Open Chrome and navigate to `chrome://extensions/`
 3. Enable **Developer mode** in the top right corner
 4. Click **Load unpacked**
 5. Select the `chatgpt_ux_suite_extension` directory
 
+### From Source (Firefox)
+1. Open Firefox and navigate to `about:debugging#/runtime/this-firefox`
+2. Click **Load Temporary Add-on…**
+3. Select `chatgpt_ux_suite_firefox/manifest.json`
+
 ## Usage
 
-Once installed, the extension works automatically on chatgpt.com. Click the extension icon in your browser toolbar to toggle features and configure settings.
+Once installed, the extension runs automatically on ChatGPT. Click the extension icon to toggle features and configure settings.
 
-## License
+Tip: Keyboard shortcuts can be customized in Chrome at `chrome://extensions/shortcuts` (and in Firefox via `about:addons` → Manage Extension Shortcuts).
 
-Prompt Navigation is free for 30 uses. Unlimited access available with a one-time purchase.
+## Pricing / Licensing
+
+Prompt Navigator includes a free tier (30 navigations). Unlimited prompt navigation can be unlocked via a one-time purchase (license key validated via Polar).
+
+All other features are included.
+
+## Privacy
+
+- Conversation parsing/token estimation happens locally in your browser.
+- If you enter a license key, the extension may contact Polar (`api.polar.sh`) to validate it (no chat content is sent).
+
+## Disclaimer
+
+ChatGPT UX Suite is not affiliated with OpenAI.

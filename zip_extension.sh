@@ -6,7 +6,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEST_DIR="$HOME/Documents/treats.sh/products"
+DEFAULT_DEST_DIR="$SCRIPT_DIR/../treats.sh/products"
+DEST_DIR="${DEST_DIR:-$DEFAULT_DEST_DIR}"
 
 # Chrome extension
 CHROME_DIR="chatgpt_ux_suite_extension"
