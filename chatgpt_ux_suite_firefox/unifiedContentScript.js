@@ -1640,6 +1640,7 @@
     let updateInterval = null;
     let promptObserver = null;
     let routeMonitorInterval = null;
+    let promptPollInterval = null;
     let observedMain = null;
     let lastObservedUrl = location.href;
     let activeStorageKey = null;
@@ -1875,6 +1876,11 @@
           // Re-attach if ChatGPT swapped the main conversation container.
           attachObserverToMain();
         }, 1000);
+      }
+
+      // Periodic reconciliation catches edge cases where DOM mutations were missed.
+      if (!promptPollInterval) {
+        promptPollInterval = setInterval(checkForNewPrompts, 5000);
       }
     }
 
