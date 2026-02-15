@@ -5,3 +5,6 @@ chatgpt_html_example.html
 .DS_Store
 
 extension_screenshots/
+
+.claude/
+ea_forum_sentiment_archaeology.md

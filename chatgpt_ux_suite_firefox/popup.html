@@ -38,7 +38,7 @@
           <div class="setting-icon icon-nav"></div>
           <div class="setting-text">
             <h3>Prompt Navigator</h3>
-            <p>Jump between prompts with <kbd>Alt+E</kbd> / <kbd>Alt+D</kbd></p>
+            <p id="prompt-nav-shortcuts">Jump between prompts with Alt+E / Alt+D</p>
           </div>
         </div>
         <label class="toggle-switch">
@@ -130,10 +130,10 @@
         <span class="license-badge" id="license-badge">Free</span>
       </div>
       <div class="license-status" id="license-status">
-        <span id="usage-text">12 navigations remaining</span>
+        <span id="usage-text" aria-live="polite">30 navigations remaining</span>
       </div>
       <div class="license-input-group" id="license-input-group">
-        <input type="text" id="license-key-input" placeholder="Enter license key" spellcheck="false">
+        <input type="text" id="license-key-input" placeholder="Enter license key" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off">
         <button id="activate-btn">Activate</button>
       </div>
       <div class="license-actions">
@@ -144,7 +144,7 @@
     </section>
 
     <footer class="popup-footer">
-      <span class="version">v1.0.0</span>
+      <span class="version">v...</span>
       <a href="https://buymeacoffee.com/xyra" target="_blank" class="feature-request-link" title="Support or request features">
         Feature request? ☕ Buy Me a Coffee
       </a>

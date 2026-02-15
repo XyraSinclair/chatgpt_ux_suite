@@ -14,6 +14,7 @@ Displays an estimated token count for the current conversation, helping you trac
 Quickly navigate between user prompts using keyboard shortcuts:
 - **Jump to Previous Prompt:** `Alt+E` (configurable)
 - **Jump to Next Prompt:** `Alt+D` (configurable)
+- Firefox on macOS also supports `Ctrl+E` / `Ctrl+D` for compatibility.
 
 ### 3. Response Styling
 Adds custom styling to improve readability:
@@ -60,6 +61,30 @@ Install from the Chrome Web Store (recommended):
 Once installed, the extension runs automatically on ChatGPT. Click the extension icon to toggle features and configure settings.
 
 Tip: Keyboard shortcuts can be customized in Chrome at `chrome://extensions/shortcuts` (and in Firefox via `about:addons` → Manage Extension Shortcuts).
+
+## Release / Store Upload
+
+### 1) Build zips
+```bash
+./zip_extension.sh
+```
+
+This creates:
+- `chatgpt_ux_suite_extension.zip` (Chrome Web Store)
+- `chatgpt_ux_suite_firefox.zip` (Firefox Add-ons)
+
+### 2) Upload to Chrome Web Store
+- Developer Dashboard: https://chrome.google.com/webstore/devconsole
+- Select **ChatGPT UX Suite**
+- Open the **Package** tab
+- Upload `chatgpt_ux_suite_extension.zip`
+- Submit for review/publish
+
+### 3) Upload to Firefox Add-ons (AMO)
+- Developer Hub: https://addons.mozilla.org/en-US/developers/
+- Existing add-ons list: https://addons.mozilla.org/en-US/developers/addons
+- Open **ChatGPT UX Suite**, then upload a new version with `chatgpt_ux_suite_firefox.zip`
+- For a brand new listing: https://addons.mozilla.org/en-US/developers/addon/submit/
 
 ## Pricing / Licensing
 

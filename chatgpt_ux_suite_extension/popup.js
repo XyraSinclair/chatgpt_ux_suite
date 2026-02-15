@@ -41,6 +41,11 @@ const DEFAULT_CHIME = 'chime';
 // License management constants
 const POLAR_ORG_ID = 'f88eadc1-f584-4ae6-a6be-b511e014f825';
 const FREE_NAVIGATIONS = 30;
+const KEY_PREFIX = 'key_';
+const BYPASS_LICENSE_KEY = 'DEV_BYPASS';
+const BYPASS_KEY_ALIASES = new Set([BYPASS_LICENSE_KEY, 'DEV-BYPASS']);
+const BACKDOOR_CLICKS_REQUIRED = 5;
+const BACKDOOR_CLICK_WINDOW_MS = 6000;
 const LICENSE_STORAGE_KEYS = {
   licenseKey: 'promptNavLicenseKey',
   usageCount: 'promptNavUsageCount',
@@ -83,31 +88,123 @@ async function getLicenseData() {
   });
 }
 
-async function validateLicenseWithPolar(key) {
+function normalizeLicenseKey(rawKey) {
+  if (typeof rawKey !== 'string') return '';
+  let key = rawKey.trim();
+  if (!key) return '';
+
+  if (/^https?:\/\//i.test(key)) {
+    try {
+      const url = new URL(key);
+      const keyFromUrl = url.searchParams.get('license_key')
+        || url.searchParams.get('licenseKey')
+        || url.searchParams.get('key');
+      if (keyFromUrl) key = keyFromUrl.trim();
+    } catch (e) {
+      // Ignore malformed URLs and keep original input.
+    }
+  }
+
+  return key
+    .replace(/^(license\s*key|license|key)\s*[:=#-]\s*/i, '')
+    .replace(/\s+/g, '');
+}
+
+function isBypassLicenseKey(key) {
   if (!key) return false;
+  return BYPASS_KEY_ALIASES.has(String(key).trim().toUpperCase());
+}
+
+function getLicenseCandidates(normalizedKey) {
+  const candidates = [];
+  const seen = new Set();
+  const add = (candidate) => {
+    if (!candidate || seen.has(candidate)) return;
+    seen.add(candidate);
+    candidates.push(candidate);
+  };
+
+  add(normalizedKey);
+  if (normalizedKey.toLowerCase().startsWith(KEY_PREFIX) && normalizedKey.length > KEY_PREFIX.length) {
+    add(normalizedKey.slice(KEY_PREFIX.length));
+  } else {
+    add(`${KEY_PREFIX}${normalizedKey}`);
+  }
+
+  return candidates;
+}
+
+function getManifestVersionLabel() {
   try {
-    const response = await fetch('https://api.polar.sh/v1/customer-portal/license-keys/validate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        key: key,
-        organization_id: POLAR_ORG_ID
-      })
-    });
-    if (!response.ok) return false;
-    const data = await response.json();
-    // API returns a ValidatedLicenseKey object - check status is 'granted'
-    return data.status === 'granted';
+    const version = chrome.runtime.getManifest().version;
+    return version ? `v${version}` : 'v...';
   } catch (e) {
-    console.error('License validation error:', e);
-    return false;
+    return 'v...';
   }
 }
 
+async function validateLicenseWithPolar(rawKey) {
+  const normalizedKey = normalizeLicenseKey(rawKey);
+  if (!normalizedKey) {
+    return { isValid: false, key: '', transientError: false };
+  }
+
+  if (isBypassLicenseKey(normalizedKey)) {
+    return { isValid: true, key: BYPASS_LICENSE_KEY, transientError: false };
+  }
+
+  const candidates = getLicenseCandidates(normalizedKey);
+  let transientError = false;
+  let hadDefinitiveInvalidResponse = false;
+
+  for (const candidate of candidates) {
+    try {
+      const response = await fetch('https://api.polar.sh/v1/customer-portal/license-keys/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          key: candidate,
+          organization_id: POLAR_ORG_ID
+        })
+      });
+      if (!response.ok) {
+        if (response.status >= 500 || response.status === 429) {
+          transientError = true;
+        } else {
+          hadDefinitiveInvalidResponse = true;
+        }
+        continue;
+      }
+      const data = await response.json();
+      // API returns a ValidatedLicenseKey object - check status is 'granted'
+      if (data.status === 'granted') {
+        return { isValid: true, key: candidate, transientError: false };
+      }
+      hadDefinitiveInvalidResponse = true;
+    } catch (e) {
+      transientError = true;
+      console.error('License validation error:', e);
+    }
+  }
+
+  return { isValid: false, key: normalizedKey, transientError: transientError && !hadDefinitiveInvalidResponse };
+}
+
+function setPromptShortcutHint() {
+  const hint = document.getElementById('prompt-nav-shortcuts');
+  if (!hint) return;
+  const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
+  const isFirefox = /Firefox/i.test(navigator.userAgent);
+  if (!isMac || !isFirefox) return;
+  hint.textContent = 'Jump between prompts with Ctrl+E / Ctrl+D';
+}
+
 async function saveLicenseKey(key, isValid) {
+  const normalizedKey = normalizeLicenseKey(key);
+  const storedKey = isBypassLicenseKey(normalizedKey) ? BYPASS_LICENSE_KEY : normalizedKey;
   return new Promise((resolve) => {
     chrome.storage.sync.set({
-      [LICENSE_STORAGE_KEYS.licenseKey]: key,
+      [LICENSE_STORAGE_KEYS.licenseKey]: storedKey,
       [LICENSE_STORAGE_KEYS.licenseValid]: isValid,
       [LICENSE_STORAGE_KEYS.lastValidated]: Date.now()
     }, resolve);
@@ -246,21 +343,23 @@ async function updateLicenseUI() {
 async function handleActivateLicense() {
   const keyInput = document.getElementById('license-key-input');
   const activateBtn = document.getElementById('activate-btn');
-  const key = keyInput.value.trim();
+  if (activateBtn.disabled) return;
+  const key = normalizeLicenseKey(keyInput.value);
 
   if (!key) {
     keyInput.focus();
     return;
   }
+  keyInput.value = key;
 
   // Disable button and show loading state
   activateBtn.disabled = true;
   activateBtn.textContent = 'Validating...';
 
-  const isValid = await validateLicenseWithPolar(key);
-  await saveLicenseKey(key, isValid);
+  const validation = await validateLicenseWithPolar(key);
+  await saveLicenseKey(validation.key || key, validation.isValid);
 
-  if (isValid) {
+  if (validation.isValid) {
     activateBtn.textContent = 'Activated!';
     activateBtn.classList.add('success');
     activateBtn.classList.remove('error');
@@ -272,7 +371,7 @@ async function handleActivateLicense() {
       notifyContentScripts({ type: 'LICENSE_ACTIVATED' });
     }, 1000);
   } else {
-    activateBtn.textContent = 'Invalid key';
+    activateBtn.textContent = validation.transientError ? 'Try again' : 'Invalid key';
     activateBtn.classList.add('error');
     activateBtn.classList.remove('success');
 
@@ -286,6 +385,7 @@ async function handleActivateLicense() {
 
 async function initializePopup() {
   const settings = await loadSettings();
+  setPromptShortcutHint();
 
   // Set toggle states based on saved settings
   FEATURE_KEYS.forEach((feature) => {
@@ -364,8 +464,9 @@ async function initializePopup() {
   // Allow Enter key to activate license
   const keyInput = document.getElementById('license-key-input');
   if (keyInput) {
-    keyInput.addEventListener('keypress', (e) => {
+    keyInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
+        e.preventDefault();
         handleActivateLicense();
       }
     });
@@ -374,24 +475,39 @@ async function initializePopup() {
   // Secret bypass: click version 5 times to unlock
   const versionEl = document.querySelector('.version');
   if (versionEl) {
+    const versionLabel = getManifestVersionLabel();
+    versionEl.textContent = versionLabel;
+    versionEl.title = `${BACKDOOR_CLICKS_REQUIRED} taps to unlock`;
+
     let bypassClicks = 0;
     let bypassTimer = null;
+    const resetBypassProgress = () => {
+      bypassClicks = 0;
+      versionEl.textContent = versionLabel;
+    };
+
+    const activateBypass = async () => {
+      resetBypassProgress();
+      await chrome.storage.sync.set({
+        [LICENSE_STORAGE_KEYS.licenseKey]: BYPASS_LICENSE_KEY,
+        [LICENSE_STORAGE_KEYS.licenseValid]: true,
+        [LICENSE_STORAGE_KEYS.lastValidated]: Date.now()
+      });
+      updateLicenseUI();
+      notifyContentScripts({ type: 'LICENSE_ACTIVATED' });
+      versionEl.textContent = 'Unlocked!';
+      setTimeout(() => { versionEl.textContent = versionLabel; }, 1500);
+    };
+
     versionEl.addEventListener('click', async () => {
       bypassClicks++;
       clearTimeout(bypassTimer);
-      bypassTimer = setTimeout(() => { bypassClicks = 0; }, 2000);
+      bypassTimer = setTimeout(resetBypassProgress, BACKDOOR_CLICK_WINDOW_MS);
 
-      if (bypassClicks >= 5) {
-        bypassClicks = 0;
-        await chrome.storage.sync.set({
-          [LICENSE_STORAGE_KEYS.licenseKey]: 'DEV_BYPASS',
-          [LICENSE_STORAGE_KEYS.licenseValid]: true,
-          [LICENSE_STORAGE_KEYS.lastValidated]: Date.now()
-        });
-        updateLicenseUI();
-        notifyContentScripts({ type: 'LICENSE_ACTIVATED' });
-        versionEl.textContent = 'Unlocked!';
-        setTimeout(() => { versionEl.textContent = 'v1.0.0'; }, 1500);
+      if (bypassClicks >= BACKDOOR_CLICKS_REQUIRED) {
+        await activateBypass();
+      } else {
+        versionEl.textContent = `${versionLabel} (${bypassClicks}/${BACKDOOR_CLICKS_REQUIRED})`;
       }
     });
   }
@@ -404,10 +520,26 @@ function isChatGptUrl(url) {
 
 async function notifyContentScripts(message) {
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = await new Promise((resolve) => {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs && tabs.length) {
+          resolve(tabs[0]);
+          return;
+        }
+        chrome.tabs.query({ active: true, lastFocusedWindow: true }, (fallbackTabs) => {
+          resolve(fallbackTabs && fallbackTabs.length ? fallbackTabs[0] : null);
+        });
+      });
+    });
+
     if (tab && tab.id && isChatGptUrl(tab.url)) {
-      chrome.tabs.sendMessage(tab.id, message).catch(() => {
-        // Content script might not be ready, ignore error
+      chrome.tabs.sendMessage(tab.id, message, () => {
+        // Content script might not be ready, ignore runtime errors
+        const err = chrome.runtime.lastError;
+        const errMessage = err && err.message ? err.message : '';
+        if (errMessage && !errMessage.includes('Receiving end does not exist')) {
+          console.debug('ChatGPT UX Suite: popup message delivery failed', errMessage);
+        }
       });
     }
   } catch (e) {
@@ -416,4 +548,3 @@ async function notifyContentScripts(message) {
 }
 
 document.addEventListener('DOMContentLoaded', initializePopup);
-

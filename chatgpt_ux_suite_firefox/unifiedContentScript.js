@@ -566,6 +566,10 @@
   const LicenseManager = (function () {
     const POLAR_ORG_ID = 'f88eadc1-f584-4ae6-a6be-b511e014f825';
     const FREE_NAVIGATIONS = 30;
+    const REVALIDATE_INTERVAL_MS = 86400000;
+    const KEY_PREFIX = 'key_';
+    const BYPASS_LICENSE_KEY = 'DEV_BYPASS';
+    const BYPASS_KEY_ALIASES = new Set([BYPASS_LICENSE_KEY, 'DEV-BYPASS']);
     const STORAGE_KEYS = {
       licenseKey: 'promptNavLicenseKey',
       usageCount: 'promptNavUsageCount',
@@ -605,36 +609,117 @@
           const isValid = result[STORAGE_KEYS.licenseValid];
           const lastValidated = result[STORAGE_KEYS.lastValidated];
           // Re-validate if older than 24 hours
-          const needsRevalidation = Date.now() - lastValidated > 86400000;
+          const needsRevalidation = Date.now() - lastValidated > REVALIDATE_INTERVAL_MS;
           resolve({ isValid, needsRevalidation });
         });
       });
     }
 
-    async function validateLicenseWithPolar(key) {
-      if (!key) return false;
-      try {
-        const response = await fetch('https://api.polar.sh/v1/customer-portal/license-keys/validate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            key: key,
-            organization_id: POLAR_ORG_ID
-          })
-        });
-        if (!response.ok) return false;
-        const data = await response.json();
-        // API returns a ValidatedLicenseKey object - check status is 'granted'
-        return data.status === 'granted';
-      } catch (e) {
-        console.error('License validation error:', e);
-        return false;
+    function normalizeLicenseKey(rawKey) {
+      if (typeof rawKey !== 'string') return '';
+      let key = rawKey.trim();
+      if (!key) return '';
+
+      if (/^https?:\/\//i.test(key)) {
+        try {
+          const url = new URL(key);
+          const keyFromUrl = url.searchParams.get('license_key')
+            || url.searchParams.get('licenseKey')
+            || url.searchParams.get('key');
+          if (keyFromUrl) key = keyFromUrl.trim();
+        } catch (e) {
+          // Ignore malformed URLs and fall back to raw input.
+        }
       }
+
+      return key
+        .replace(/^(license\s*key|license|key)\s*[:=#-]\s*/i, '')
+        .replace(/\s+/g, '');
+    }
+
+    function isBypassLicenseKey(key) {
+      if (!key) return false;
+      return BYPASS_KEY_ALIASES.has(String(key).trim().toUpperCase());
+    }
+
+    function getLicenseCandidates(normalizedKey) {
+      const candidates = [];
+      const seen = new Set();
+      const add = (candidate) => {
+        if (!candidate || seen.has(candidate)) return;
+        seen.add(candidate);
+        candidates.push(candidate);
+      };
+
+      add(normalizedKey);
+      if (normalizedKey.toLowerCase().startsWith(KEY_PREFIX) && normalizedKey.length > KEY_PREFIX.length) {
+        add(normalizedKey.slice(KEY_PREFIX.length));
+      } else {
+        add(`${KEY_PREFIX}${normalizedKey}`);
+      }
+      return candidates;
+    }
+
+    async function validateLicenseWithPolar(rawKey) {
+      const normalizedKey = normalizeLicenseKey(rawKey);
+      if (!normalizedKey) {
+        return { isValid: false, key: '', transientError: false };
+      }
+
+      if (isBypassLicenseKey(normalizedKey)) {
+        return { isValid: true, key: BYPASS_LICENSE_KEY, transientError: false };
+      }
+
+      const candidates = getLicenseCandidates(normalizedKey);
+      let transientError = false;
+      let hadDefinitiveInvalidResponse = false;
+
+      for (const candidate of candidates) {
+        try {
+          const response = await fetch('https://api.polar.sh/v1/customer-portal/license-keys/validate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              key: candidate,
+              organization_id: POLAR_ORG_ID
+            })
+          });
+          if (!response.ok) {
+            if (response.status >= 500 || response.status === 429) {
+              transientError = true;
+            } else {
+              hadDefinitiveInvalidResponse = true;
+            }
+            continue;
+          }
+          const data = await response.json();
+          // API returns a ValidatedLicenseKey object - check status is 'granted'
+          if (data.status === 'granted') {
+            return { isValid: true, key: candidate, transientError: false };
+          }
+          hadDefinitiveInvalidResponse = true;
+        } catch (e) {
+          transientError = true;
+          console.error('License validation error:', e);
+        }
+      }
+
+      return { isValid: false, key: normalizedKey, transientError: transientError && !hadDefinitiveInvalidResponse };
     }
 
     async function checkAndValidateLicense() {
-      const licenseKey = await getLicenseKey();
-      if (!licenseKey) return false;
+      const storedLicenseKey = await getLicenseKey();
+      const normalizedKey = normalizeLicenseKey(storedLicenseKey);
+      if (!normalizedKey) return false;
+
+      if (isBypassLicenseKey(normalizedKey)) {
+        await chrome.storage.sync.set({
+          [STORAGE_KEYS.licenseKey]: BYPASS_LICENSE_KEY,
+          [STORAGE_KEYS.licenseValid]: true,
+          [STORAGE_KEYS.lastValidated]: Date.now()
+        });
+        return true;
+      }
 
       const { isValid, needsRevalidation } = await isLicenseValid();
 
@@ -643,12 +728,32 @@
       }
 
       // Re-validate with Polar
-      const valid = await validateLicenseWithPolar(licenseKey);
+      const validation = await validateLicenseWithPolar(normalizedKey);
+      if (validation.isValid) {
+        await chrome.storage.sync.set({
+          [STORAGE_KEYS.licenseKey]: validation.key,
+          [STORAGE_KEYS.licenseValid]: true,
+          [STORAGE_KEYS.lastValidated]: Date.now()
+        });
+        return true;
+      }
+
+      // Keep prior active state on transient network failures.
+      if (validation.transientError && isValid) {
+        await chrome.storage.sync.set({
+          [STORAGE_KEYS.licenseKey]: normalizedKey,
+          [STORAGE_KEYS.licenseValid]: true,
+          [STORAGE_KEYS.lastValidated]: Date.now()
+        });
+        return true;
+      }
+
       await chrome.storage.sync.set({
-        [STORAGE_KEYS.licenseValid]: valid,
+        [STORAGE_KEYS.licenseKey]: validation.key || normalizedKey,
+        [STORAGE_KEYS.licenseValid]: false,
         [STORAGE_KEYS.lastValidated]: Date.now()
       });
-      return valid;
+      return false;
     }
 
     async function canUseNavigation() {
@@ -679,9 +784,12 @@
       getRemainingFreeUses,
       checkAndValidateLicense,
       validateLicenseWithPolar,
-      saveLicense: async (key, isValid) => {
+      normalizeLicenseKey,
+      saveLicense: async (rawKey, isValid) => {
+        const normalizedKey = normalizeLicenseKey(rawKey);
+        const storedKey = isBypassLicenseKey(normalizedKey) ? BYPASS_LICENSE_KEY : normalizedKey;
         await chrome.storage.sync.set({
-          [STORAGE_KEYS.licenseKey]: key,
+          [STORAGE_KEYS.licenseKey]: storedKey,
           [STORAGE_KEYS.licenseValid]: isValid,
           [STORAGE_KEYS.lastValidated]: Date.now()
         });
@@ -696,10 +804,12 @@
   const PromptNavigator = (function () {
     const WIDGET_ID = 'prompt-navigator-widget';
     const UPGRADE_MODAL_ID = 'prompt-nav-upgrade-modal';
+    const DUPLICATE_TRIGGER_WINDOW_MS = 140;
     let enabled = true;
     let prompts = [];
     let lastAnchor = null;
     let lastJumpTime = 0;
+    let lastJumpTrigger = { source: '', direction: '', timestamp: 0 };
     let widgetLabel = null;
     let revertTimer = null;
     let refreshTimer = null;
@@ -922,16 +1032,20 @@
       label.className = 'pn-label';
       label.textContent = 'PromptNav';
       widgetLabel = label;
+
+      const isMacPlatform = /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
+      const prevShortcutHint = isMacPlatform ? 'Alt+E / Ctrl+E' : 'Alt+E';
+      const nextShortcutHint = isMacPlatform ? 'Alt+D / Ctrl+D' : 'Alt+D';
       
       const btnUp = document.createElement('button');
       btnUp.textContent = '▲';
-      btnUp.title = 'Previous Prompt (Alt+E)';
-      btnUp.onclick = (e) => { e.stopPropagation(); handleJump('previous'); };
+      btnUp.title = `Previous Prompt (${prevShortcutHint})`;
+      btnUp.onclick = (e) => { e.stopPropagation(); handleJump('previous', 'widget-button'); };
       
       const btnDown = document.createElement('button');
       btnDown.textContent = '▼';
-      btnDown.title = 'Next Prompt (Alt+D)';
-      btnDown.onclick = (e) => { e.stopPropagation(); handleJump('next'); };
+      btnDown.title = `Next Prompt (${nextShortcutHint})`;
+      btnDown.onclick = (e) => { e.stopPropagation(); handleJump('next', 'widget-button'); };
       
       controls.appendChild(label);
       controls.appendChild(btnUp);
@@ -992,7 +1106,7 @@
       heading.textContent = 'Unlock Unlimited Navigation';
 
       const desc = document.createElement('p');
-      desc.textContent = "You've used all 12 free prompt navigations.";
+      desc.textContent = `You've used all ${LicenseManager.FREE_NAVIGATIONS} free prompt navigations.`;
 
       const subtext = document.createElement('p');
       subtext.className = 'pn-modal-subtext';
@@ -1018,6 +1132,9 @@
       licenseInput.className = 'pn-license-input';
       licenseInput.placeholder = 'Enter license key';
       licenseInput.spellcheck = false;
+      licenseInput.autocomplete = 'off';
+      licenseInput.autocorrect = 'off';
+      licenseInput.autocapitalize = 'off';
 
       const activateBtn = document.createElement('button');
       activateBtn.className = 'pn-activate-btn';
@@ -1205,22 +1322,23 @@
       });
 
       activateBtn.addEventListener('click', async () => {
-        const key = licenseInput.value.trim();
+        const key = LicenseManager.normalizeLicenseKey(licenseInput.value);
         if (!key) {
           licenseInput.focus();
           return;
         }
+        licenseInput.value = key;
 
         activateBtn.disabled = true;
         activateBtn.textContent = 'Validating...';
         licenseStatus.textContent = '';
         licenseStatus.className = 'pn-license-status';
 
-        const isValid = await LicenseManager.validateLicenseWithPolar(key);
+        const validation = await LicenseManager.validateLicenseWithPolar(key);
 
-        if (isValid) {
+        if (validation.isValid) {
           // Save license key
-          await LicenseManager.saveLicense(key, true);
+          await LicenseManager.saveLicense(validation.key, true);
 
           licenseStatus.textContent = 'License activated! Enjoy unlimited navigation.';
           licenseStatus.className = 'pn-license-status success';
@@ -1229,15 +1347,18 @@
           // Close modal after short delay
           setTimeout(() => overlay.remove(), 1500);
         } else {
-          licenseStatus.textContent = 'Invalid license key. Please try again.';
+          licenseStatus.textContent = validation.transientError
+            ? 'Could not validate key right now. Check connection and try again.'
+            : 'Invalid license key. Please try again.';
           licenseStatus.className = 'pn-license-status error';
           activateBtn.textContent = 'Activate';
           activateBtn.disabled = false;
         }
       });
 
-      licenseInput.addEventListener('keypress', (e) => {
+      licenseInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
+          e.preventDefault();
           activateBtn.click();
         }
       });
@@ -1249,7 +1370,42 @@
       }
     }
 
-    async function handleJump(direction) {
+    function isEditableTarget(target) {
+      const element = target && target.nodeType === Node.TEXT_NODE ? target.parentElement : target;
+      if (!element) return false;
+      if (element.isContentEditable) return true;
+      if (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA') return true;
+      return typeof element.closest === 'function'
+        && !!element.closest('[contenteditable="true"], [role="textbox"]');
+    }
+
+    function getShortcutDirection(event) {
+      const key = (event.key || '').toLowerCase();
+      const code = (event.code || '').toLowerCase();
+      const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
+      const hasSingleModifier = !event.shiftKey && !event.metaKey && (
+        (event.altKey && !event.ctrlKey) ||
+        (isMac && event.ctrlKey && !event.altKey)
+      );
+      if (!hasSingleModifier) return null;
+      if (code === 'keye' || key === 'e') return 'previous';
+      if (code === 'keyd' || key === 'd') return 'next';
+      return null;
+    }
+
+    function shouldIgnoreDuplicateJump(direction, source) {
+      const now = Date.now();
+      const isDuplicate = lastJumpTrigger.direction === direction
+        && lastJumpTrigger.source
+        && lastJumpTrigger.source !== source
+        && (now - lastJumpTrigger.timestamp) < DUPLICATE_TRIGGER_WINDOW_MS;
+
+      lastJumpTrigger = { direction, source, timestamp: now };
+      return isDuplicate;
+    }
+
+    async function handleJump(direction, source = 'unknown') {
+      if (shouldIgnoreDuplicateJump(direction, source)) return;
       try {
         // Check license/usage before allowing navigation
         const access = await LicenseManager.canUseNavigation();
@@ -1288,25 +1444,18 @@
     function setupInputHandler() {
       window.addEventListener('keydown', (e) => {
         if (!enabled) return;
-        const target = e.target;
-        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
-        if (e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey) {
-          if (e.code === 'KeyE') {
-            e.preventDefault();
-            e.stopPropagation();
-            handleJump('previous');
-          } else if (e.code === 'KeyD') {
-            e.preventDefault();
-            e.stopPropagation();
-            handleJump('next');
-          }
-        }
+        if (isEditableTarget(e.target)) return;
+        const direction = getShortcutDirection(e);
+        if (!direction) return;
+        e.preventDefault();
+        e.stopPropagation();
+        handleJump(direction, 'inline-shortcut');
       }, { capture: true });
 
       if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
         chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (msg.type === 'PROMPT_JUMP' && enabled) {
-            handleJump(msg.direction);
+            handleJump(msg.direction, 'extension-command');
             sendResponse({ received: true });
           }
         });
@@ -3015,4 +3164,3 @@
     window.addEventListener('DOMContentLoaded', initializeAllFeatures);
   }
 })();
-
