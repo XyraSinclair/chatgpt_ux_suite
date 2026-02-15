@@ -1,6 +1,6 @@
 'use strict';
 
-const FEATURE_KEYS = ['tokenCounter', 'promptNavigator', 'responseStyling', 'sessionTracker', 'contextCollector', 'soundNotification'];
+const FEATURE_KEYS = ['tokenCounter', 'promptNavigator', 'responseStyling', 'sessionTracker', 'contextCollector', 'chatTimestamps', 'soundNotification'];
 
 const DEFAULT_SETTINGS = {
   tokenCounter: true,
@@ -8,6 +8,7 @@ const DEFAULT_SETTINGS = {
   responseStyling: true,
   sessionTracker: true,
   contextCollector: true,
+  chatTimestamps: false,
   soundNotification: false
 };
 

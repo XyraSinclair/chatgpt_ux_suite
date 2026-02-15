@@ -1,6 +1,6 @@
 # ChatGPT UX Suite
 
-ChatGPT UX Suite is a browser extension that adds small, fast UX upgrades to ChatGPT (token counter, rapid prompt navigation, context export, session time tracking, styling tweaks, and a completion chime).
+ChatGPT UX Suite is a browser extension that adds small, fast UX upgrades to ChatGPT (token counter, rapid prompt navigation, session tracking, optional message datetimes, context export, styling tweaks, and a completion chime).
 
 - Chrome Web Store: [ChatGPT UX Suite](https://chromewebstore.google.com/detail/chatgpt-ux-suite/nlecdlfghppkoghjgjbgihhfjbdmckao)
 - Supported sites: `https://chatgpt.com/*` and `https://chat.openai.com/*`
@@ -23,8 +23,9 @@ Adds custom styling to improve readability:
 
 ### 4. Session Time Tracking
 Monitor your ChatGPT activity:
-- View time since last prompt
-- Session timer displayed in the navigation widget
+- View compact elapsed timers for `chatStart` and `lastPrompt`
+- See subtle absolute date/time values alongside those timers
+- Tracker data persists per conversation and reconciles after reloads/navigation
 
 ### 5. Context Collector
 Select and export conversation messages:
@@ -32,7 +33,13 @@ Select and export conversation messages:
 - Export as Plain Text, JSON, or XML
 - Configurable message separators
 
-### 6. Sound Notification
+### 6. Message Datetimes (Optional)
+Show subtle local date/time labels for each chat message:
+- Low-contrast, low-visual-noise display
+- Uses message timestamps when available
+- Handles dynamic route changes and partial reloads
+
+### 7. Sound Notification
 Play a chime when ChatGPT completes a response:
 - Multiple chime styles (Aurora, Ocean, Velvet, Chime)
 - Low-frequency, ear-friendly tones
@@ -61,6 +68,15 @@ Install from the Chrome Web Store (recommended):
 Once installed, the extension runs automatically on ChatGPT. Click the extension icon to toggle features and configure settings.
 
 Tip: Keyboard shortcuts can be customized in Chrome at `chrome://extensions/shortcuts` (and in Firefox via `about:addons` → Manage Extension Shortcuts).
+
+## Version Notes
+
+### 1.0.4 (2026-02-15)
+- Added optional **Message Datetimes** feature (toggle in popup).
+- Session tracker now shows low-key absolute times for `chatStart` and `lastPrompt`.
+- Improved timestamp resilience for older chats, reloads, and dynamic DOM swaps.
+- Hardened timestamp caching to avoid stale values when ChatGPT reuses or re-renders turn nodes.
+- Synced Chrome and Firefox extension bundles for matching behavior.
 
 ## Release / Store Upload
 

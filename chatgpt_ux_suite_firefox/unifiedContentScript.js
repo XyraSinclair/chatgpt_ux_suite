@@ -18,6 +18,7 @@
     responseStyling: true,
     sessionTracker: true,
     contextCollector: true,
+    chatTimestamps: false,
     soundNotification: false
   };
 
@@ -151,6 +152,173 @@
       }
     });
     return turns;
+  }
+
+  function normalizeUnixTimestampMs(value) {
+    const numeric = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) return null;
+    // ChatGPT message create_time is typically in seconds.
+    return numeric > 1e12 ? Math.round(numeric) : Math.round(numeric * 1000);
+  }
+
+  function findReactFiberNode(target) {
+    if (!target || typeof target !== 'object') return null;
+    const fiberKey = Object.keys(target).find((key) => key.startsWith('__reactFiber$'));
+    return fiberKey ? target[fiberKey] : null;
+  }
+
+  function extractCreateTimeMsFromFiber(rootFiber) {
+    if (!rootFiber || typeof rootFiber !== 'object') return null;
+
+    const queue = [rootFiber];
+    const seen = new Set();
+    let inspected = 0;
+
+    while (queue.length && inspected < 320) {
+      const node = queue.shift();
+      if (!node || typeof node !== 'object' || seen.has(node)) continue;
+      seen.add(node);
+      inspected++;
+
+      const direct = normalizeUnixTimestampMs(node.create_time);
+      if (direct) return direct;
+
+      const propsCandidates = [node.memoizedProps, node.pendingProps, node.props];
+      for (const props of propsCandidates) {
+        if (!props || typeof props !== 'object') continue;
+
+        const propsDirect = normalizeUnixTimestampMs(props.create_time);
+        if (propsDirect) return propsDirect;
+
+        const messageDirect = normalizeUnixTimestampMs(props.message && props.message.create_time);
+        if (messageDirect) return messageDirect;
+
+        if (Array.isArray(props.messages)) {
+          for (const message of props.messages) {
+            const ts = normalizeUnixTimestampMs(message && message.create_time);
+            if (ts) return ts;
+          }
+        }
+      }
+
+      // Traverse nearby React fibers first.
+      if (node.return) queue.push(node.return);
+      if (node.child) queue.push(node.child);
+      if (node.sibling) queue.push(node.sibling);
+    }
+
+    return null;
+  }
+
+  function getTurnIdentity(turn, source) {
+    if (!turn || typeof turn.getAttribute !== 'function') return null;
+
+    const sourceId =
+      source &&
+      typeof source.getAttribute === 'function' &&
+      source.getAttribute('data-message-id');
+    if (sourceId) return `mid:${sourceId}`;
+
+    const turnId = turn.getAttribute('data-message-id');
+    if (turnId) return `mid:${turnId}`;
+
+    const sourceTestId =
+      source &&
+      typeof source.getAttribute === 'function' &&
+      source.getAttribute('data-testid');
+    if (sourceTestId) return `tid:${sourceTestId}`;
+
+    const turnTestId = turn.getAttribute('data-testid');
+    if (turnTestId) return `tid:${turnTestId}`;
+
+    return null;
+  }
+
+  function extractTimestampFromTimeElement(turn) {
+    if (!turn || typeof turn.querySelector !== 'function') return null;
+    const timeEl = turn.querySelector('time[datetime]');
+    if (!timeEl) return null;
+    const datetime = timeEl.getAttribute('datetime');
+    if (!datetime) return null;
+    const parsed = Date.parse(datetime);
+    if (!Number.isFinite(parsed) || parsed <= 0) return null;
+    return Math.round(parsed);
+  }
+
+  function getTurnTimestampMs(turn) {
+    if (!turn || typeof turn !== 'object') return null;
+
+    const source = (typeof turn.matches === 'function' && turn.matches('[data-message-id]'))
+      ? turn
+      : turn.querySelector && turn.querySelector('[data-message-id]')
+        ? turn.querySelector('[data-message-id]')
+        : turn;
+    const identity = getTurnIdentity(turn, source);
+
+    const cachedOnTurn = normalizeUnixTimestampMs(
+      turn.getAttribute && turn.getAttribute('data-ux-create-time-ms')
+    );
+    const cachedIdentityOnTurn =
+      turn.getAttribute && turn.getAttribute('data-ux-create-time-key');
+    if (cachedOnTurn && (!identity || !cachedIdentityOnTurn || cachedIdentityOnTurn === identity)) {
+      return cachedOnTurn;
+    }
+
+    const cachedOnSource =
+      source && source !== turn
+        ? normalizeUnixTimestampMs(source.getAttribute && source.getAttribute('data-ux-create-time-ms'))
+        : null;
+    const cachedIdentityOnSource =
+      source && source !== turn && source.getAttribute
+        ? source.getAttribute('data-ux-create-time-key')
+        : null;
+    if (cachedOnSource && (!identity || !cachedIdentityOnSource || cachedIdentityOnSource === identity)) {
+      if (turn.setAttribute) {
+        turn.setAttribute('data-ux-create-time-ms', String(cachedOnSource));
+        if (identity) turn.setAttribute('data-ux-create-time-key', identity);
+      }
+      return cachedOnSource;
+    }
+
+    const fiber = findReactFiberNode(source) || findReactFiberNode(turn);
+    let timestampMs = extractCreateTimeMsFromFiber(fiber);
+    if (!timestampMs) {
+      timestampMs = extractTimestampFromTimeElement(turn);
+    }
+    if (!timestampMs) return null;
+
+    if (source && source.setAttribute) {
+      source.setAttribute('data-ux-create-time-ms', String(timestampMs));
+      if (identity) source.setAttribute('data-ux-create-time-key', identity);
+    }
+    if (turn !== source && turn && turn.setAttribute) {
+      turn.setAttribute('data-ux-create-time-ms', String(timestampMs));
+      if (identity) turn.setAttribute('data-ux-create-time-key', identity);
+    }
+    return timestampMs;
+  }
+
+  function formatAbsoluteDateTime(timestamp, options = {}) {
+    if (!timestamp) return '';
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) return '';
+
+    const now = new Date();
+    const sameYear = now.getFullYear() === date.getFullYear();
+    const includeSeconds = options.includeSeconds === true;
+
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: sameYear ? undefined : 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        second: includeSeconds ? '2-digit' : undefined
+      }).format(date);
+    } catch (e) {
+      return date.toLocaleString();
+    }
   }
 
   // =============================================================================
@@ -1712,6 +1880,11 @@
         }
         #${TRACKER_ROW_ID} .st-section { white-space: nowrap; }
         #${TRACKER_ROW_ID} .st-val { color: #b0b0b0; }
+        #${TRACKER_ROW_ID} .st-abs {
+          color: #7b7b7b;
+          margin-left: 4px;
+          font-size: 8px;
+        }
       `;
       document.head.appendChild(style);
     }
@@ -1726,6 +1899,12 @@
       val.dataset.role = role;
       val.textContent = '—';
       section.appendChild(val);
+
+      const abs = document.createElement('span');
+      abs.className = 'st-abs';
+      abs.dataset.role = `${role}-abs`;
+      abs.textContent = '';
+      section.appendChild(abs);
       return section;
     }
 
@@ -1754,11 +1933,13 @@
       // Use PromptNavigator's prompt detection
       const main = getConversationMain();
       if (!main) {
-        return { userCount: 0, maxUserTurnIndex: -1 };
+        return { userCount: 0, maxUserTurnIndex: -1, firstUserTimestampMs: null, lastUserTimestampMs: null };
       }
       const turns = collectConversationTurns(main);
       let userCount = 0;
       let maxUserTurnIndex = -1;
+      let firstUserTimestampMs = null;
+      let lastUserTimestampMs = null;
       turns.forEach((turn, index) => {
         const role = determineMessageRole(turn, index);
         if (role !== 'user') return;
@@ -1772,8 +1953,18 @@
             maxUserTurnIndex = Math.max(maxUserTurnIndex, numericIndex);
           }
         }
+
+        const turnTimestamp = getTurnTimestampMs(turn);
+        if (turnTimestamp) {
+          if (!firstUserTimestampMs || turnTimestamp < firstUserTimestampMs) {
+            firstUserTimestampMs = turnTimestamp;
+          }
+          if (!lastUserTimestampMs || turnTimestamp > lastUserTimestampMs) {
+            lastUserTimestampMs = turnTimestamp;
+          }
+        }
       });
-      return { userCount, maxUserTurnIndex };
+      return { userCount, maxUserTurnIndex, firstUserTimestampMs, lastUserTimestampMs };
     }
 
     function updateDisplay() {
@@ -1783,14 +1974,20 @@
 
       const startedEl = row.querySelector('[data-role="started"]');
       const activeEl = row.querySelector('[data-role="active"]');
+      const startedAbsEl = row.querySelector('[data-role="started-abs"]');
+      const activeAbsEl = row.querySelector('[data-role="active-abs"]');
       const startSection = row.querySelector('[data-section="start"]');
       const promptSection = row.querySelector('[data-section="prompt"]');
 
       const startTime = formatCompactTime(sessionStartTime);
       const promptTime = formatCompactTime(lastPromptTime);
+      const startAbsolute = formatAbsoluteDateTime(sessionStartTime);
+      const promptAbsolute = formatAbsoluteDateTime(lastPromptTime);
 
       if (startedEl) startedEl.textContent = startTime;
       if (activeEl) activeEl.textContent = promptTime;
+      if (startedAbsEl) startedAbsEl.textContent = startAbsolute ? `(${startAbsolute})` : '';
+      if (activeAbsEl) activeAbsEl.textContent = promptAbsolute ? `(${promptAbsolute})` : '';
 
       // Only show sections if we have recorded times
       if (startSection) {
@@ -1909,10 +2106,18 @@
 
         if (!promotedUntitledConversation) {
           // First time seeing this conversation (new or old)
-          sessionStartTime = null;
-          lastPromptTime = null;
+          sessionStartTime = snapshot.firstUserTimestampMs || null;
+          lastPromptTime = snapshot.userCount >= 2 ? (snapshot.lastUserTimestampMs || null) : null;
           lastPromptTurnIndex = -1;
         }
+      }
+
+      // Fill gaps when older data exists but lacked historical timestamps.
+      if (!sessionStartTime && snapshot.firstUserTimestampMs) {
+        sessionStartTime = snapshot.firstUserTimestampMs;
+      }
+      if (!lastPromptTime && snapshot.userCount >= 2 && snapshot.lastUserTimestampMs) {
+        lastPromptTime = snapshot.lastUserTimestampMs;
       }
 
       // Always sync to current rendered state to prevent stale baseline after navigation.
@@ -1969,7 +2174,190 @@
   })();
 
   // =============================================================================
-  // Feature 5: Context Collector
+  // Feature 5: Message Datetimes
+  // =============================================================================
+  const ChatTimestamps = (function () {
+    const TURN_TIMESTAMP_ATTR = 'data-ux-chat-timestamp';
+    const TURN_ROLE_ATTR = 'data-ux-chat-timestamp-role';
+    const STYLE_ID = 'chat-timestamps-style';
+
+    let enabled = false;
+    let observer = null;
+    let observedMain = null;
+    let routeInterval = null;
+    let refreshInterval = null;
+    let updateTimeout = null;
+    let lastObservedUrl = location.href;
+
+    function injectStyles() {
+      if (document.getElementById(STYLE_ID)) return;
+      const style = document.createElement('style');
+      style.id = STYLE_ID;
+      style.textContent = `
+        [${TURN_TIMESTAMP_ATTR}]::before {
+          content: attr(${TURN_TIMESTAMP_ATTR});
+          display: block;
+          font-size: 10px;
+          line-height: 1.25;
+          letter-spacing: 0.01em;
+          color: rgba(139, 148, 158, 0.72);
+          margin: 2px 0 6px;
+          user-select: none;
+          pointer-events: none;
+        }
+        [${TURN_ROLE_ATTR}="user"]::before {
+          text-align: right;
+          padding-right: 2px;
+        }
+        [${TURN_ROLE_ATTR}="assistant"]::before {
+          text-align: left;
+          padding-left: 2px;
+        }
+        @media (max-width: 768px) {
+          [${TURN_TIMESTAMP_ATTR}]::before {
+            font-size: 9px;
+            margin-bottom: 5px;
+          }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    function clearTimestampAttributes(root = document) {
+      const scope = root && typeof root.querySelectorAll === 'function' ? root : document;
+      scope.querySelectorAll(`[${TURN_TIMESTAMP_ATTR}], [${TURN_ROLE_ATTR}]`).forEach((turn) => {
+        turn.removeAttribute(TURN_TIMESTAMP_ATTR);
+        turn.removeAttribute(TURN_ROLE_ATTR);
+      });
+    }
+
+    function applyTimestamps() {
+      if (!enabled) return;
+      const main = getConversationMain();
+      if (!main) return;
+
+      const turns = collectConversationTurns(main);
+      turns.forEach((turn, index) => {
+        if (!isElementVisible(turn)) return;
+
+        const timestampMs = getTurnTimestampMs(turn);
+        if (!timestampMs) {
+          turn.removeAttribute(TURN_TIMESTAMP_ATTR);
+          turn.removeAttribute(TURN_ROLE_ATTR);
+          return;
+        }
+
+        const timestampLabel = formatAbsoluteDateTime(timestampMs);
+        if (timestampLabel) {
+          turn.setAttribute(TURN_TIMESTAMP_ATTR, timestampLabel);
+        }
+
+        const role = determineMessageRole(turn, index);
+        if (role === 'user' || role === 'assistant') {
+          turn.setAttribute(TURN_ROLE_ATTR, role);
+        } else {
+          turn.removeAttribute(TURN_ROLE_ATTR);
+        }
+      });
+    }
+
+    function scheduleApply() {
+      if (updateTimeout) clearTimeout(updateTimeout);
+      updateTimeout = setTimeout(() => {
+        updateTimeout = null;
+        applyTimestamps();
+      }, 160);
+    }
+
+    function attachObserverToMain() {
+      if (!observer) return;
+      const main = getConversationMain();
+      if (!main || main === observedMain) return;
+
+      observer.disconnect();
+      observedMain = main;
+      observer.observe(main, { childList: true, subtree: true });
+      scheduleApply();
+    }
+
+    function startMonitoring() {
+      if (!observer) {
+        observer = new MutationObserver(() => {
+          scheduleApply();
+        });
+      }
+
+      attachObserverToMain();
+
+      if (!routeInterval) {
+        routeInterval = setInterval(() => {
+          if (!enabled) return;
+
+          if (location.href !== lastObservedUrl) {
+            lastObservedUrl = location.href;
+            observedMain = null;
+            attachObserverToMain();
+            scheduleApply();
+            return;
+          }
+
+          attachObserverToMain();
+        }, 1000);
+      }
+
+      if (!refreshInterval) {
+        refreshInterval = setInterval(() => {
+          if (enabled) applyTimestamps();
+        }, 10000);
+      }
+    }
+
+    function stopMonitoring() {
+      if (observer) {
+        observer.disconnect();
+        observer = null;
+      }
+      observedMain = null;
+
+      if (routeInterval) {
+        clearInterval(routeInterval);
+        routeInterval = null;
+      }
+      if (refreshInterval) {
+        clearInterval(refreshInterval);
+        refreshInterval = null;
+      }
+      if (updateTimeout) {
+        clearTimeout(updateTimeout);
+        updateTimeout = null;
+      }
+    }
+
+    function enable() {
+      if (enabled) return;
+      enabled = true;
+      injectStyles();
+      lastObservedUrl = location.href;
+      startMonitoring();
+      applyTimestamps();
+    }
+
+    function disable() {
+      if (!enabled) return;
+      enabled = false;
+      stopMonitoring();
+      clearTimestampAttributes(document);
+    }
+
+    function init() {
+      enable();
+    }
+
+    return { init, enable, disable, setEnabled: (val) => val ? enable() : disable() };
+  })();
+
+  // =============================================================================
+  // Feature 6: Context Collector
   // =============================================================================
   const ContextCollector = (function () {
     const FAB_ID = 'context-collector-fab';
@@ -3199,6 +3587,9 @@
     if (currentSettings.contextCollector) ContextCollector.init();
     else ContextCollector.disable();
 
+    if (currentSettings.chatTimestamps) ChatTimestamps.init();
+    else ChatTimestamps.disable();
+
     if (currentSettings.soundNotification) SoundNotification.init();
     else SoundNotification.disable();
 
@@ -3208,6 +3599,7 @@
       PromptNavigator.setEnabled(settings.promptNavigator);
       ResponseStyling.setEnabled(settings.responseStyling);
       ContextCollector.setEnabled(settings.contextCollector);
+      ChatTimestamps.setEnabled(settings.chatTimestamps);
       SoundNotification.setEnabled(settings.soundNotification);
       updateSessionTrackerVisibility();
     });
@@ -3224,6 +3616,7 @@
           if (message.feature === 'responseStyling') ResponseStyling.setEnabled(message.enabled);
           if (message.feature === 'sessionTracker') updateSessionTrackerVisibility();
           if (message.feature === 'contextCollector') ContextCollector.setEnabled(message.enabled);
+          if (message.feature === 'chatTimestamps') ChatTimestamps.setEnabled(message.enabled);
           if (message.feature === 'soundNotification') {
             SoundNotification.setEnabled(message.enabled);
             if (message.enabled) SoundNotification.playNotificationSound();

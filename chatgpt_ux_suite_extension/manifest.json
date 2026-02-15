@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "ChatGPT UX Suite",
   "short_name": "GPT UX",
-  "version": "1.0.3",
-  "description": "Rapid prompt navigation, token counter, easy context export, session time tracking, styling & sound notifications for chatgpt.",
+  "version": "1.0.4",
+  "description": "Rapid prompt navigation, token counter, session tracking, message datetimes, context export, styling, and sound notifications for ChatGPT.",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",

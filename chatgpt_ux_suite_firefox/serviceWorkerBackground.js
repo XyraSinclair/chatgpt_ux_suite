@@ -18,6 +18,7 @@ const DEFAULT_SETTINGS = {
   responseStyling: true,
   sessionTracker: true,
   contextCollector: true,
+  chatTimestamps: false,
   soundNotification: false
 };
 
@@ -113,4 +114,3 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Keep channel open for async response
   }
 });
-
