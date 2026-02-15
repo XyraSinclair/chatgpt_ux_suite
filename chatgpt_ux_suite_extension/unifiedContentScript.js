@@ -1880,11 +1880,6 @@
         }
         #${TRACKER_ROW_ID} .st-section { white-space: nowrap; }
         #${TRACKER_ROW_ID} .st-val { color: #b0b0b0; }
-        #${TRACKER_ROW_ID} .st-abs {
-          color: #7b7b7b;
-          margin-left: 4px;
-          font-size: 8px;
-        }
       `;
       document.head.appendChild(style);
     }
@@ -1899,12 +1894,6 @@
       val.dataset.role = role;
       val.textContent = '—';
       section.appendChild(val);
-
-      const abs = document.createElement('span');
-      abs.className = 'st-abs';
-      abs.dataset.role = `${role}-abs`;
-      abs.textContent = '';
-      section.appendChild(abs);
       return section;
     }
 
@@ -1974,20 +1963,14 @@
 
       const startedEl = row.querySelector('[data-role="started"]');
       const activeEl = row.querySelector('[data-role="active"]');
-      const startedAbsEl = row.querySelector('[data-role="started-abs"]');
-      const activeAbsEl = row.querySelector('[data-role="active-abs"]');
       const startSection = row.querySelector('[data-section="start"]');
       const promptSection = row.querySelector('[data-section="prompt"]');
 
       const startTime = formatCompactTime(sessionStartTime);
       const promptTime = formatCompactTime(lastPromptTime);
-      const startAbsolute = formatAbsoluteDateTime(sessionStartTime);
-      const promptAbsolute = formatAbsoluteDateTime(lastPromptTime);
 
       if (startedEl) startedEl.textContent = startTime;
       if (activeEl) activeEl.textContent = promptTime;
-      if (startedAbsEl) startedAbsEl.textContent = startAbsolute ? `(${startAbsolute})` : '';
-      if (activeAbsEl) activeAbsEl.textContent = promptAbsolute ? `(${promptAbsolute})` : '';
 
       // Only show sections if we have recorded times
       if (startSection) {
@@ -2177,8 +2160,9 @@
   // Feature 5: Message Datetimes
   // =============================================================================
   const ChatTimestamps = (function () {
-    const TURN_TIMESTAMP_ATTR = 'data-ux-chat-timestamp';
-    const TURN_ROLE_ATTR = 'data-ux-chat-timestamp-role';
+    const MESSAGE_SELECTOR = 'div[data-message-id]';
+    const TIMESTAMP_CLASS = 'ux-chat-timestamp-inline';
+    const MESSAGE_MARK_ATTR = 'data-ux-chat-timestamp-attached';
     const STYLE_ID = 'chat-timestamps-style';
 
     let enabled = false;
@@ -2194,40 +2178,71 @@
       const style = document.createElement('style');
       style.id = STYLE_ID;
       style.textContent = `
-        [${TURN_TIMESTAMP_ATTR}]::before {
-          content: attr(${TURN_TIMESTAMP_ATTR});
+        .${TIMESTAMP_CLASS} {
           display: block;
-          font-size: 10px;
-          line-height: 1.25;
+          font-size: 11px;
+          line-height: 1.3;
+          font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+          font-variant-numeric: tabular-nums;
           letter-spacing: 0.01em;
-          color: rgba(139, 148, 158, 0.72);
-          margin: 2px 0 6px;
-          user-select: none;
+          color: #8b949e;
+          opacity: 0.78;
+          margin: 0 0 6px auto;
+          width: fit-content;
+          max-width: 100%;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          user-select: text;
           pointer-events: none;
         }
-        [${TURN_ROLE_ATTR}="user"]::before {
-          text-align: right;
-          padding-right: 2px;
-        }
-        [${TURN_ROLE_ATTR}="assistant"]::before {
-          text-align: left;
-          padding-left: 2px;
-        }
         @media (max-width: 768px) {
-          [${TURN_TIMESTAMP_ATTR}]::before {
+          .${TIMESTAMP_CLASS} {
             font-size: 9px;
-            margin-bottom: 5px;
+            margin-bottom: 4px;
+          }
+        }
+        @media (prefers-color-scheme: light) {
+          .${TIMESTAMP_CLASS} {
+            color: #6b7280;
           }
         }
       `;
       document.head.appendChild(style);
     }
 
-    function clearTimestampAttributes(root = document) {
+    function findMessageNode(turn) {
+      if (!turn || typeof turn !== 'object') return null;
+      if (typeof turn.matches === 'function' && turn.matches(MESSAGE_SELECTOR)) {
+        return turn;
+      }
+      if (typeof turn.querySelector === 'function') {
+        return turn.querySelector(MESSAGE_SELECTOR);
+      }
+      return null;
+    }
+
+    function findTimestampElement(messageNode) {
+      if (!messageNode || typeof messageNode.querySelector !== 'function') return null;
+      try {
+        const directChild = messageNode.querySelector(`:scope > .${TIMESTAMP_CLASS}`);
+        if (directChild) return directChild;
+      } catch (e) { }
+
+      const candidates = messageNode.querySelectorAll(`.${TIMESTAMP_CLASS}`);
+      for (const candidate of candidates) {
+        if (candidate.parentElement === messageNode) return candidate;
+      }
+      return messageNode.querySelector(`.${TIMESTAMP_CLASS}`);
+    }
+
+    function clearTimestamps(root = document) {
       const scope = root && typeof root.querySelectorAll === 'function' ? root : document;
-      scope.querySelectorAll(`[${TURN_TIMESTAMP_ATTR}], [${TURN_ROLE_ATTR}]`).forEach((turn) => {
-        turn.removeAttribute(TURN_TIMESTAMP_ATTR);
-        turn.removeAttribute(TURN_ROLE_ATTR);
+      scope.querySelectorAll(`.${TIMESTAMP_CLASS}`).forEach((timestampEl) => {
+        timestampEl.remove();
+      });
+      scope.querySelectorAll(`${MESSAGE_SELECTOR}[${MESSAGE_MARK_ATTR}]`).forEach((messageNode) => {
+        messageNode.removeAttribute(MESSAGE_MARK_ATTR);
       });
     }
 
@@ -2236,27 +2251,50 @@
       const main = getConversationMain();
       if (!main) return;
 
+      const seenMessageNodes = new Set();
       const turns = collectConversationTurns(main);
       turns.forEach((turn, index) => {
         if (!isElementVisible(turn)) return;
 
+        const messageNode = findMessageNode(turn);
+        if (!messageNode) return;
+        seenMessageNodes.add(messageNode);
+
+        const existingTimestamp = findTimestampElement(messageNode);
+        const role = determineMessageRole(turn, index);
+        if (role !== 'assistant') {
+          if (existingTimestamp) existingTimestamp.remove();
+          messageNode.removeAttribute(MESSAGE_MARK_ATTR);
+          return;
+        }
+
         const timestampMs = getTurnTimestampMs(turn);
         if (!timestampMs) {
-          turn.removeAttribute(TURN_TIMESTAMP_ATTR);
-          turn.removeAttribute(TURN_ROLE_ATTR);
+          if (existingTimestamp) existingTimestamp.remove();
+          messageNode.removeAttribute(MESSAGE_MARK_ATTR);
           return;
         }
 
         const timestampLabel = formatAbsoluteDateTime(timestampMs);
-        if (timestampLabel) {
-          turn.setAttribute(TURN_TIMESTAMP_ATTR, timestampLabel);
-        }
+        if (!timestampLabel) return;
 
-        const role = determineMessageRole(turn, index);
-        if (role === 'user' || role === 'assistant') {
-          turn.setAttribute(TURN_ROLE_ATTR, role);
-        } else {
-          turn.removeAttribute(TURN_ROLE_ATTR);
+        const fullDateTime = new Date(timestampMs).toLocaleString();
+        const timestampEl = existingTimestamp || document.createElement('span');
+        timestampEl.className = TIMESTAMP_CLASS;
+        timestampEl.textContent = timestampLabel;
+        timestampEl.title = fullDateTime;
+        timestampEl.setAttribute('aria-label', `Message time ${fullDateTime}`);
+
+        if (messageNode.firstElementChild !== timestampEl) {
+          messageNode.prepend(timestampEl);
+        }
+        messageNode.setAttribute(MESSAGE_MARK_ATTR, '1');
+      });
+
+      main.querySelectorAll(`.${TIMESTAMP_CLASS}`).forEach((timestampEl) => {
+        const host = timestampEl.closest(MESSAGE_SELECTOR);
+        if (!host || !seenMessageNodes.has(host) || host.getAttribute(MESSAGE_MARK_ATTR) !== '1') {
+          timestampEl.remove();
         }
       });
     }
@@ -2346,7 +2384,7 @@
       if (!enabled) return;
       enabled = false;
       stopMonitoring();
-      clearTimestampAttributes(document);
+      clearTimestamps(document);
     }
 
     function init() {

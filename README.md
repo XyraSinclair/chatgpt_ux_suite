@@ -24,7 +24,6 @@ Adds custom styling to improve readability:
 ### 4. Session Time Tracking
 Monitor your ChatGPT activity:
 - View compact elapsed timers for `chatStart` and `lastPrompt`
-- See subtle absolute date/time values alongside those timers
 - Tracker data persists per conversation and reconciles after reloads/navigation
 
 ### 5. Context Collector
@@ -71,9 +70,13 @@ Tip: Keyboard shortcuts can be customized in Chrome at `chrome://extensions/shor
 
 ## Version Notes
 
+### 1.0.5 (2026-02-15)
+- Kept the bottom-right session tracker compact (no added datetime text there).
+- Refined **Message Datetimes** to render elegantly inline on ChatGPT assistant messages.
+- Tightened timestamp placement logic to avoid clutter and stale labels during dynamic re-renders.
+
 ### 1.0.4 (2026-02-15)
 - Added optional **Message Datetimes** feature (toggle in popup).
-- Session tracker now shows low-key absolute times for `chatStart` and `lastPrompt`.
 - Improved timestamp resilience for older chats, reloads, and dynamic DOM swaps.
 - Hardened timestamp caching to avoid stale values when ChatGPT reuses or re-renders turn nodes.
 - Synced Chrome and Firefox extension bundles for matching behavior.
