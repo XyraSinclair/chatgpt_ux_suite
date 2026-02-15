@@ -1636,8 +1636,13 @@
     let sessionStartTime = null;
     let lastPromptTime = null;
     let lastPromptCount = 0;
+    let lastPromptTurnIndex = -1;
     let updateInterval = null;
     let promptObserver = null;
+    let routeMonitorInterval = null;
+    let observedMain = null;
+    let lastObservedUrl = location.href;
+    let activeStorageKey = null;
 
     function formatCompactTime(timestamp) {
       if (!timestamp) return '—';
@@ -1654,7 +1659,7 @@
     }
 
     function getConversationId() {
-      const match = location.pathname.match(/\/c\/([a-f0-9-]+)/i);
+      const match = location.pathname.match(/\/c\/([a-z0-9-]+)/i);
       return match ? match[1] : null;
     }
 
@@ -1682,7 +1687,8 @@
         localStorage.setItem(key, JSON.stringify({
           sessionStartTime,
           lastPromptTime,
-          lastPromptCount
+          lastPromptCount,
+          lastPromptTurnIndex
         }));
       } catch (e) { }
     }
@@ -1743,18 +1749,30 @@
       return row;
     }
 
-    function getCurrentPromptCount() {
+    function getPromptSnapshot() {
       // Use PromptNavigator's prompt detection
       const main = getConversationMain();
-      if (!main) return 0;
+      if (!main) {
+        return { userCount: 0, maxUserTurnIndex: -1 };
+      }
       const turns = collectConversationTurns(main);
       let userCount = 0;
+      let maxUserTurnIndex = -1;
       turns.forEach((turn, index) => {
-        if (!isElementVisible(turn)) return;
         const role = determineMessageRole(turn, index);
-        if (role === 'user') userCount++;
+        if (role !== 'user') return;
+
+        userCount++;
+        const testId = turn.getAttribute('data-testid') || '';
+        const match = testId.match(/conversation-turn-(\d+)/i);
+        if (match) {
+          const numericIndex = Number(match[1]);
+          if (Number.isFinite(numericIndex)) {
+            maxUserTurnIndex = Math.max(maxUserTurnIndex, numericIndex);
+          }
+        }
       });
-      return userCount;
+      return { userCount, maxUserTurnIndex };
     }
 
     function updateDisplay() {
@@ -1783,25 +1801,53 @@
     }
 
     function checkForNewPrompts() {
-      const currentCount = getCurrentPromptCount();
-      if (currentCount > lastPromptCount) {
+      const snapshot = getPromptSnapshot();
+      const indexTrackingAvailable = snapshot.maxUserTurnIndex >= 0 && lastPromptTurnIndex >= 0;
+      const indexIncreased = indexTrackingAvailable && snapshot.maxUserTurnIndex > lastPromptTurnIndex;
+      const countIncreased = !indexTrackingAvailable && snapshot.userCount > lastPromptCount;
+      const detectedNewPrompt = indexIncreased || countIncreased;
+
+      if (detectedNewPrompt) {
         // A NEW prompt was added RIGHT NOW (we witnessed it!)
         const now = Date.now();
 
-        // Only set sessionStartTime if we don't have one AND this is genuinely the first prompt
-        if (!sessionStartTime && currentCount === 1) {
+        // Recover from any missed first-prompt event (e.g., URL changed to /c/<id> mid-flow).
+        if (!sessionStartTime && snapshot.userCount >= 1) {
           sessionStartTime = now;
         }
 
         // Only set lastPromptTime for 2nd+ prompts (no "last" when there's only 1)
-        if (currentCount >= 2) {
+        if (snapshot.userCount >= 2) {
           lastPromptTime = now;
         }
 
-        lastPromptCount = currentCount;
+        lastPromptCount = Math.max(lastPromptCount, snapshot.userCount);
+        if (snapshot.maxUserTurnIndex >= 0) {
+          lastPromptTurnIndex = Math.max(lastPromptTurnIndex, snapshot.maxUserTurnIndex);
+        }
         saveSessionData();
         updateDisplay();
+        return;
       }
+
+      // Baseline sync: absorb improvements in loaded DOM but avoid lowering baseline due virtualization churn.
+      if (snapshot.userCount > lastPromptCount) {
+        lastPromptCount = snapshot.userCount;
+      }
+      if (snapshot.maxUserTurnIndex >= 0 && snapshot.maxUserTurnIndex > lastPromptTurnIndex) {
+        lastPromptTurnIndex = snapshot.maxUserTurnIndex;
+      }
+    }
+
+    function attachObserverToMain() {
+      if (!promptObserver) return;
+      const main = getConversationMain();
+      if (!main || main === observedMain) return;
+
+      promptObserver.disconnect();
+      observedMain = main;
+      promptObserver.observe(main, { childList: true, subtree: true });
+      checkForNewPrompts();
     }
 
     function setupPromptTracking() {
@@ -1813,38 +1859,62 @@
         promptObserver._debounce = setTimeout(checkForNewPrompts, 500);
       });
 
-      const main = getConversationMain();
-      if (main) {
-        promptObserver.observe(main, { childList: true, subtree: true });
-      }
+      attachObserverToMain();
 
       // Track URL changes
-      let lastUrl = location.href;
-      setInterval(() => {
-        if (location.href !== lastUrl) {
-          lastUrl = location.href;
-          initSession();
-        }
-      }, 1000);
+      if (!routeMonitorInterval) {
+        routeMonitorInterval = setInterval(() => {
+          if (location.href !== lastObservedUrl) {
+            lastObservedUrl = location.href;
+            observedMain = null;
+            initSession();
+            attachObserverToMain();
+            return;
+          }
+
+          // Re-attach if ChatGPT swapped the main conversation container.
+          attachObserverToMain();
+        }, 1000);
+      }
     }
 
     function initSession() {
+      const nextStorageKey = getStorageKey();
+      const previousStorageKey = activeStorageKey;
+      activeStorageKey = nextStorageKey;
+
       const existingData = loadSessionData();
-      const currentCount = getCurrentPromptCount();
+      const snapshot = getPromptSnapshot();
 
       if (existingData) {
         // Returning to a conversation we've seen before
         sessionStartTime = existingData.sessionStartTime || null;
         lastPromptTime = existingData.lastPromptTime || null;
-        // CRITICAL: Always sync lastPromptCount to current count
-        // This prevents claiming we witnessed prompts added while we were away
-        lastPromptCount = currentCount;
+        lastPromptTurnIndex = Number.isFinite(existingData.lastPromptTurnIndex)
+          ? existingData.lastPromptTurnIndex
+          : -1;
       } else {
-        // First time seeing this conversation (new or old)
-        sessionStartTime = null;
-        lastPromptTime = null;
-        lastPromptCount = currentCount;
+        // Preserve in-memory first-prompt timing when a fresh chat gains a conversation id.
+        const promotedUntitledConversation =
+          !previousStorageKey &&
+          !!nextStorageKey &&
+          !!sessionStartTime &&
+          snapshot.userCount > 0;
+
+        if (!promotedUntitledConversation) {
+          // First time seeing this conversation (new or old)
+          sessionStartTime = null;
+          lastPromptTime = null;
+          lastPromptTurnIndex = -1;
+        }
       }
+
+      // Always sync to current rendered state to prevent stale baseline after navigation.
+      lastPromptCount = snapshot.userCount;
+      if (snapshot.maxUserTurnIndex >= 0) {
+        lastPromptTurnIndex = snapshot.maxUserTurnIndex;
+      }
+
       saveSessionData();
       updateDisplay();
     }
@@ -1884,7 +1954,9 @@
       ensureTrackerRow();
       initSession();
       setupPromptTracking();
-      updateInterval = setInterval(updateDisplay, 30000);
+      if (!updateInterval) {
+        updateInterval = setInterval(updateDisplay, 30000);
+      }
     }
 
     return { init, enable, disable, setEnabled: (val) => val ? enable() : disable() };
