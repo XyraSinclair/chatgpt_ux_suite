@@ -109,6 +109,24 @@
     return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
   }
 
+  const CONVERSATION_TURN_SELECTORS = [
+    '[data-testid^="conversation-turn"]',
+    '[data-testid*="conversation-turn"]',
+    '[data-message-author-role]',
+    '[data-message-id]',
+    'article'
+  ];
+  const MESSAGE_TEXT_STRIP_SELECTORS = 'button, svg, style, script, textarea, input, select, [role="button"], [aria-hidden="true"], [hidden]';
+  const MESSAGE_PREFIX_PATTERNS = [
+    /^You said:\s*/i,
+    /^You wrote:\s*/i,
+    /^ChatGPT said:\s*/i,
+    /^ChatGPT wrote:\s*/i,
+    /^ChatGPT\s*\n+/i,
+    /^Assistant said:\s*/i,
+    /^User said:\s*/i
+  ];
+
   function determineMessageRole(el, index) {
     const roleAttr = el.getAttribute('data-message-author-role') || el.dataset?.messageAuthorRole;
     if (roleAttr) return roleAttr;
@@ -129,22 +147,28 @@
     return index % 2 === 0 ? 'user' : 'assistant';
   }
 
-  function collectConversationTurns(root) {
-    const candidates = Array.from(
-      root.querySelectorAll('[data-testid^="conversation-turn"], [data-message-author-role]')
+  function getConversationTurnContainer(node) {
+    if (!node || typeof node.closest !== 'function') return null;
+    return (
+      node.closest('[data-testid^="conversation-turn"]') ||
+      node.closest('[data-testid*="conversation-turn"]') ||
+      node.closest('article') ||
+      node.closest('[data-message-id]') ||
+      (typeof node.matches === 'function' && node.matches(CONVERSATION_TURN_SELECTORS.join(', ')) ? node : null)
     );
+  }
+
+  function collectConversationTurns(root) {
+    const candidates = Array.from(root.querySelectorAll(CONVERSATION_TURN_SELECTORS.join(', ')));
 
     if (candidates.length === 0) {
-      return Array.from(root.querySelectorAll('article'));
+      return [];
     }
 
     const seen = new Set();
     const turns = [];
     candidates.forEach((node) => {
-      const container =
-        node.closest('[data-testid^="conversation-turn"]') ||
-        node.closest('article') ||
-        node;
+      const container = getConversationTurnContainer(node);
 
       if (container && !seen.has(container)) {
         seen.add(container);
@@ -152,6 +176,61 @@
       }
     });
     return turns;
+  }
+
+  function isReasoningOnlyTurn(el) {
+    const text = (el?.textContent || '').trim();
+
+    if (/^Thought for \d+/i.test(text)) return true;
+    if (/^Thinking\.{0,3}$/i.test(text)) return true;
+
+    const ariaLabel = el?.getAttribute?.('aria-label') || '';
+    if (/thought for|thinking/i.test(ariaLabel)) return true;
+
+    const details = el?.querySelector?.('details, summary');
+    if (details) {
+      const detailsText = (details.textContent || '').trim();
+      if (/^Thought for \d+/i.test(detailsText) || /^Thinking/i.test(detailsText)) return true;
+    }
+
+    const hasThinkingText = /Thought for \d+|Thinking/i.test(text);
+    return hasThinkingText && text.length < 100;
+  }
+
+  function extractMessageTextFromTurn(turn, extraStripSelectors) {
+    if (!turn || typeof turn.cloneNode !== 'function') return '';
+
+    const clone = turn.cloneNode(true);
+    const stripSelectors = [MESSAGE_TEXT_STRIP_SELECTORS, extraStripSelectors].filter(Boolean).join(', ');
+    if (stripSelectors) {
+      clone.querySelectorAll(stripSelectors).forEach((el) => el.remove());
+    }
+
+    clone.querySelectorAll('details, summary').forEach((el) => {
+      const text = el.textContent || '';
+      if (/Thought for \d+|Thinking|reasoning/i.test(text)) {
+        el.remove();
+      }
+    });
+
+    let text = (clone.innerText || clone.textContent || '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/\s+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim();
+
+    MESSAGE_PREFIX_PATTERNS.forEach((pattern) => {
+      text = text.replace(pattern, '');
+    });
+
+    text = text
+      .replace(/^Thought for [^\n]+$/gim, '')
+      .replace(/^Thinking\.{0,3}$/gim, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+
+    return text;
   }
 
   function normalizeUnixTimestampMs(value) {
@@ -541,14 +620,6 @@
       return container;
     }
 
-    function extractArticleText(article) {
-      const wrapper = document.createElement('div');
-      wrapper.innerHTML = article.innerHTML;
-      wrapper.querySelectorAll('button, svg, style, script, textarea, input, select, [role="button"], [aria-hidden="true"], [hidden]')
-        .forEach((el) => el.remove());
-      return (wrapper.innerText || wrapper.textContent || '').replace(/\u00a0/g, ' ').replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
-    }
-
     function gatherAttachments(root) {
       const scope = root instanceof HTMLElement ? root : document;
       const elements = Array.from(scope.querySelectorAll(ATTACHMENT_SELECTORS.join(', ')));
@@ -556,6 +627,7 @@
       const seen = new Set();
       elements.forEach((element) => {
         const anchor = element.closest('[data-testid*="attachment"]') || element.closest('[data-testid*="file"]') || element;
+        if (!isElementVisible(anchor)) return;
         const candidates = [];
         ['data-file-name', 'data-filename', 'title', 'aria-label'].forEach((attr) => {
           if (anchor.hasAttribute(attr)) candidates.push(anchor.getAttribute(attr));
@@ -577,13 +649,17 @@
     function gatherConversation() {
       const main = getConversationMain();
       if (!main) return { messages: [], attachments: [] };
-      const articles = Array.from(main.querySelectorAll('article'));
-      const messages = articles.map((article, index) => {
-        const text = extractArticleText(article);
+      const turns = collectConversationTurns(main)
+        .filter((turn) => isElementVisible(turn) && !isReasoningOnlyTurn(turn));
+      const messages = turns.map((turn, index) => {
+        const text = extractMessageTextFromTurn(turn);
         if (!text) return null;
+        const messageNode = (typeof turn.matches === 'function' && turn.matches('[data-message-id]'))
+          ? turn
+          : turn.querySelector('[data-message-id]');
         return {
-          id: article.getAttribute('data-message-id') || article.id || `msg-${index}`,
-          role: determineMessageRole(article, index),
+          id: messageNode?.getAttribute('data-message-id') || turn.getAttribute('data-testid') || turn.id || `msg-${index}`,
+          role: determineMessageRole(turn, index),
           text
         };
       }).filter(Boolean);
@@ -681,12 +757,27 @@
       if (!container) return;
       const { messages, attachments } = gatherConversation();
       const estimation = estimateConversationStats(messages, attachments);
-      if (!estimation) return;
+      if (!estimation) {
+        const emptySignature = `${location.href}|empty`;
+        if (container.dataset.signature !== emptySignature) {
+          renderCounterSnapshot(container, {
+            totalTokens: 0,
+            userTokens: 0,
+            assistantTokens: 0,
+            totalWords: 0,
+            attachments: []
+          });
+          container.dataset.signature = emptySignature;
+        }
+        lastSignature = emptySignature;
+        return;
+      }
       const { enrichedMessages, attachmentDetails, snapshot } = estimation;
       const signature = buildSignature(enrichedMessages, attachmentDetails, snapshot.totalTokens);
-      if (signature === lastSignature) return;
+      if (signature === lastSignature && container.dataset.signature === signature) return;
       lastSignature = signature;
       renderCounterSnapshot(container, snapshot);
+      container.dataset.signature = signature;
     }
 
     function scheduleUpdate() {
@@ -703,12 +794,14 @@
     function enable() {
       enabled = true;
       counterDismissed = false;
+      lastSignature = '';
       scheduleUpdate();
       initObservers();
     }
 
     function disable() {
       enabled = false;
+      lastSignature = '';
       const container = document.getElementById(COUNTER_ID);
       if (container) container.remove();
     }
@@ -2895,31 +2988,7 @@
     }
 
     function isThinkingIndicator(el) {
-      // Filter out "Thought for Xm Xs" reasoning indicators from o1/thinking models
-      const text = (el.textContent || '').trim();
-
-      // Check if it's purely a thinking indicator (short text starting with pattern)
-      if (/^Thought for \d+/i.test(text)) return true;
-      if (/^Thinking\.{0,3}$/i.test(text)) return true;
-
-      // Check for aria-label that indicates thinking state
-      const ariaLabel = el.getAttribute('aria-label') || '';
-      if (/thought for/i.test(ariaLabel)) return true;
-
-      // Check for details/summary elements with thinking content (collapsed reasoning)
-      const details = el.querySelector('details, summary');
-      if (details) {
-        const detailsText = (details.textContent || '').trim();
-        if (/^Thought for \d+/i.test(detailsText)) return true;
-      }
-
-      // Check if the element only contains a thinking block (no actual message content)
-      // This catches turns that are just the thinking indicator without response
-      const hasThinkingText = /Thought for \d+[ms\s]/i.test(text);
-      const isShortElement = text.length < 100;
-      if (hasThinkingText && isShortElement) return true;
-
-      return false;
+      return isReasoningOnlyTurn(el);
     }
 
     function scanTurns() {
@@ -2993,44 +3062,7 @@
     }
 
     function extractTurnText(turn) {
-      const clone = turn.cloneNode(true);
-      clone.querySelectorAll('button, svg, style, script, textarea, input, select, [role="button"], [aria-hidden="true"], [hidden], .cc-checkbox-overlay')
-        .forEach((el) => el.remove());
-
-      // Remove thinking/reasoning sections (o1 model "Thought for Xm Xs" blocks)
-      clone.querySelectorAll('details, summary').forEach((el) => {
-        const text = el.textContent || '';
-        if (/Thought for \d+|Thinking|reasoning/i.test(text)) {
-          el.remove();
-        }
-      });
-
-      let text = (clone.innerText || clone.textContent || '')
-        .replace(/\u00a0/g, ' ')
-        .replace(/\s+\n/g, '\n')
-        .replace(/\n{3,}/g, '\n\n')
-        .replace(/[ \t]{2,}/g, ' ')
-        .trim();
-
-      // Remove common ChatGPT UI prefixes that create redundancy
-      const prefixPatterns = [
-        /^You said:\s*/i,
-        /^You wrote:\s*/i,
-        /^ChatGPT said:\s*/i,
-        /^ChatGPT wrote:\s*/i,
-        /^ChatGPT\s*\n+/i,
-        /^Assistant said:\s*/i,
-        /^User said:\s*/i
-      ];
-      for (const pattern of prefixPatterns) {
-        text = text.replace(pattern, '');
-      }
-
-      // Remove "Thought for Xm Xs" lines from the text
-      text = text.replace(/^Thought for \d+[ms].*$/gm, '').trim();
-      text = text.replace(/\n{3,}/g, '\n\n');
-
-      return text.trim();
+      return extractMessageTextFromTurn(turn, '.cc-checkbox-overlay');
     }
 
     function clearSelection() {
