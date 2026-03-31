@@ -70,6 +70,11 @@ Tip: Keyboard shortcuts can be customized in Chrome at `chrome://extensions/shor
 
 ## Version Notes
 
+### 1.0.6 (2026-03-31)
+- Restored the **Token Counter** after a ChatGPT site update changed turn/message DOM structure.
+- Moved token estimation onto the shared turn parser used by the newer collector tools.
+- Fixed stale counter states when re-enabling the feature or opening an empty chat.
+
 ### 1.0.5 (2026-02-15)
 - Kept the bottom-right session tracker compact (no added datetime text there).
 - Refined **Message Datetimes** to render elegantly inline on ChatGPT assistant messages.
