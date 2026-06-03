@@ -70,6 +70,11 @@ Tip: Keyboard shortcuts can be customized in Chrome at `chrome://extensions/shor
 
 ## Version Notes
 
+### 1.0.7 (2026-06-03)
+- Restored **Rapid Prompt Navigation** and **Context Collector** behavior for ChatGPT conversations whose message DOM is virtualized as you scroll.
+- Added a full-conversation data cache backed by ChatGPT's same-origin conversation payload, with rendered DOM parsing retained as a fallback.
+- Kept selected context messages stable when ChatGPT unmounts and remounts conversation turns during scrolling.
+
 ### 1.0.6 (2026-03-31)
 - Restored the **Token Counter** after a ChatGPT site update changed turn/message DOM structure.
 - Moved token estimation onto the shared turn parser used by the newer collector tools.

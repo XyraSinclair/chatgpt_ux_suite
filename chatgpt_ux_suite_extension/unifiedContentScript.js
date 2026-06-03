@@ -400,6 +400,374 @@
     }
   }
 
+  function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function getConversationIdFromLocation() {
+    const match = location.pathname.match(/(?:^|\/)c\/([^/?#]+)/);
+    if (!match) return null;
+    try {
+      return decodeURIComponent(match[1]);
+    } catch (e) {
+      return match[1];
+    }
+  }
+
+  function normalizeTextForSignature(text) {
+    return String(text || '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function getTextSignature(text) {
+    const normalized = normalizeTextForSignature(text);
+    if (!normalized) return '';
+    return `${normalized.length}:${normalized.slice(0, 180)}`;
+  }
+
+  function getTurnMessageIdCandidates(turn) {
+    if (!turn || typeof turn !== 'object') return [];
+    const ids = [];
+    const add = (value) => {
+      if (typeof value !== 'string') return;
+      const trimmed = value.trim();
+      if (trimmed && !ids.includes(trimmed)) ids.push(trimmed);
+    };
+
+    if (typeof turn.getAttribute === 'function') {
+      add(turn.getAttribute('data-message-id'));
+      add(turn.getAttribute('data-testid'));
+      add(turn.id);
+    }
+
+    const messageNode =
+      typeof turn.matches === 'function' && turn.matches('[data-message-id]')
+        ? turn
+        : turn.querySelector && turn.querySelector('[data-message-id]');
+    if (messageNode && typeof messageNode.getAttribute === 'function') {
+      add(messageNode.getAttribute('data-message-id'));
+      add(messageNode.id);
+    }
+
+    return ids;
+  }
+
+  function getRecordKey(record) {
+    if (!record) return '';
+    return String(record.key || record.id || record.nodeId || `message-${record.index}`);
+  }
+
+  function recordMatchesTurn(record, turn) {
+    if (!record || !turn) return false;
+    const ids = getTurnMessageIdCandidates(turn);
+    if (ids.length) {
+      if (record.id && ids.includes(record.id)) return true;
+      if (record.nodeId && ids.includes(record.nodeId)) return true;
+    }
+
+    const turnRole = determineMessageRole(turn, 0);
+    if (record.role && turnRole && record.role !== turnRole) return false;
+
+    const text = extractMessageTextFromTurn(turn);
+    if (!text) return false;
+    return getTextSignature(text) === record.fingerprint;
+  }
+
+  function extractConversationPartText(part) {
+    if (typeof part === 'string') return part;
+    if (!part || typeof part !== 'object') return '';
+
+    const directText = part.text || part.content || part.value || part.transcript;
+    if (typeof directText === 'string') return directText;
+
+    if (directText && typeof directText === 'object') {
+      const nested = directText.text || directText.value || directText.content;
+      if (typeof nested === 'string') return nested;
+    }
+
+    if (part.content_type === 'image_asset_pointer' || part.asset_pointer) {
+      return part.name ? `[Image: ${part.name}]` : '[Image]';
+    }
+
+    if (part.name && (part.mime_type || part.file_id || part.asset_pointer)) {
+      return `[Attachment: ${part.name}]`;
+    }
+
+    return '';
+  }
+
+  function extractConversationMessageText(message) {
+    if (!message || typeof message !== 'object') return '';
+    const content = message.content;
+    const pieces = [];
+
+    if (typeof content === 'string') {
+      pieces.push(content);
+    } else if (content && typeof content === 'object') {
+      if (Array.isArray(content.parts)) {
+        content.parts.forEach((part) => {
+          const text = extractConversationPartText(part);
+          if (text) pieces.push(text);
+        });
+      }
+
+      ['text', 'result', 'summary'].forEach((key) => {
+        if (typeof content[key] === 'string') pieces.push(content[key]);
+      });
+    }
+
+    const attachments = message.metadata && Array.isArray(message.metadata.attachments)
+      ? message.metadata.attachments
+      : [];
+    attachments.forEach((attachment) => {
+      const name = attachment && (attachment.name || attachment.file_name || attachment.filename);
+      if (name) pieces.push(`[Attachment: ${name}]`);
+    });
+
+    return pieces
+      .map((piece) => String(piece).trim())
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+
+  function shouldIncludeConversationMessage(message) {
+    if (!message || typeof message !== 'object') return false;
+    const role = message.author && message.author.role;
+    if (role !== 'user' && role !== 'assistant') return false;
+
+    const metadata = message.metadata || {};
+    if (
+      metadata.is_visually_hidden_from_conversation ||
+      metadata.is_user_system_message ||
+      metadata.hidden ||
+      metadata.message_type === 'system'
+    ) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function createDomMessageRecord(turn, index) {
+    if (!turn) return null;
+    const text = extractMessageTextFromTurn(turn, '.cc-checkbox-overlay');
+    if (!text) return null;
+    const role = determineMessageRole(turn, index);
+    if (role !== 'user' && role !== 'assistant') return null;
+    const ids = getTurnMessageIdCandidates(turn);
+    const id = ids.find((candidate) => !candidate.startsWith('conversation-turn')) || ids[0] || `dom-${index}`;
+
+    return {
+      id,
+      nodeId: id,
+      key: id,
+      role,
+      text,
+      createTimeMs: getTurnTimestampMs(turn),
+      index,
+      branchIndex: index,
+      userIndex: role === 'user' ? index : null,
+      source: 'dom',
+      fingerprint: getTextSignature(text)
+    };
+  }
+
+  const ConversationDataStore = (() => {
+    const CACHE_TTL_MS = 30000;
+    const FETCH_RETRY_MS = 120000;
+    const ACCESS_TOKEN_TTL_MS = 300000;
+    let cache = null;
+    let pendingFetch = null;
+    let accessTokenCache = { token: '', fetchedAt: 0 };
+
+    function getOrderedNodes(payload) {
+      const mapping = payload && payload.mapping;
+      if (!mapping || typeof mapping !== 'object') return [];
+
+      const nodes = [];
+      const seen = new Set();
+      let current = payload.current_node;
+      while (current && mapping[current] && !seen.has(current)) {
+        const node = mapping[current];
+        seen.add(current);
+        nodes.push(node);
+        current = node.parent;
+      }
+
+      if (nodes.length) return nodes.reverse();
+
+      return Object.values(mapping).sort((a, b) => {
+        const aTime = normalizeUnixTimestampMs(a && a.message && a.message.create_time) || 0;
+        const bTime = normalizeUnixTimestampMs(b && b.message && b.message.create_time) || 0;
+        return aTime - bTime;
+      });
+    }
+
+    function parsePayload(payload, conversationId) {
+      const orderedNodes = getOrderedNodes(payload);
+      const messages = [];
+      let userIndex = 0;
+
+      orderedNodes.forEach((node, branchIndex) => {
+        const message = node && node.message;
+        if (!shouldIncludeConversationMessage(message)) return;
+
+        const text = extractConversationMessageText(message);
+        if (!text) return;
+
+        const role = message.author.role;
+        const id = String(message.id || node.id || `message-${messages.length}`);
+        const nodeId = String(node.id || message.id || id);
+        const record = {
+          id,
+          nodeId,
+          key: `${nodeId}:${id}`,
+          role,
+          text,
+          createTimeMs: normalizeUnixTimestampMs(message.create_time),
+          index: messages.length,
+          branchIndex,
+          userIndex: role === 'user' ? userIndex : null,
+          source: 'api',
+          fingerprint: getTextSignature(text)
+        };
+        if (role === 'user') userIndex += 1;
+        messages.push(record);
+      });
+
+      return {
+        conversationId,
+        currentNode: payload && payload.current_node,
+        title: payload && payload.title,
+        messages,
+        userMessages: messages.filter((message) => message.role === 'user'),
+        fetchedAt: Date.now()
+      };
+    }
+
+    async function getAccessToken(force = false) {
+      const now = Date.now();
+      if (!force && accessTokenCache.token && now - accessTokenCache.fetchedAt < ACCESS_TOKEN_TTL_MS) {
+        return accessTokenCache.token;
+      }
+
+      const response = await fetch(`${location.origin}/api/auth/session`, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' }
+      });
+      if (!response.ok) return '';
+
+      const session = await response.json();
+      const token = session && (session.accessToken || session.access_token || session.token);
+      accessTokenCache = {
+        token: typeof token === 'string' ? token : '',
+        fetchedAt: Date.now()
+      };
+      return accessTokenCache.token;
+    }
+
+    async function fetchConversationWithToken(conversationId, accessToken) {
+      const endpoint = `${location.origin}/backend-api/conversation/${encodeURIComponent(conversationId)}`;
+      const headers = { Accept: 'application/json' };
+      if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+      return fetch(endpoint, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers
+      });
+    }
+
+    async function fetchConversation(conversationId) {
+      let response = await fetchConversationWithToken(conversationId, accessTokenCache.token);
+      if (response.status === 401 || response.status === 403) {
+        const accessToken = await getAccessToken(true);
+        if (accessToken) {
+          response = await fetchConversationWithToken(conversationId, accessToken);
+        }
+      }
+      if (!response.ok) {
+        throw new Error(`Conversation fetch failed: ${response.status}`);
+      }
+      return response.json();
+    }
+
+    function getCachedSnapshot() {
+      const conversationId = getConversationIdFromLocation();
+      if (!conversationId || !cache || cache.conversationId !== conversationId) return null;
+      return cache.snapshot || null;
+    }
+
+    async function refresh(options = {}) {
+      const conversationId = getConversationIdFromLocation();
+      if (!conversationId) {
+        cache = null;
+        return null;
+      }
+
+      const now = Date.now();
+      if (
+        !options.force &&
+        cache &&
+        cache.conversationId === conversationId &&
+        cache.snapshot &&
+        now - cache.fetchedAt < CACHE_TTL_MS
+      ) {
+        return cache.snapshot;
+      }
+
+      if (
+        !options.force &&
+        cache &&
+        cache.conversationId === conversationId &&
+        cache.error &&
+        now - cache.fetchedAt < FETCH_RETRY_MS
+      ) {
+        return cache.snapshot;
+      }
+
+      if (pendingFetch && pendingFetch.conversationId === conversationId) {
+        return pendingFetch.promise;
+      }
+
+      const promise = fetchConversation(conversationId)
+        .then((payload) => {
+          const snapshot = parsePayload(payload, conversationId);
+          cache = { conversationId, snapshot, fetchedAt: Date.now(), error: null };
+          return snapshot;
+        })
+        .catch((error) => {
+          console.warn('ChatGPT UX Suite: full conversation fetch unavailable; falling back to rendered messages.', error);
+          cache = { conversationId, snapshot: cache && cache.conversationId === conversationId ? cache.snapshot : null, fetchedAt: Date.now(), error };
+          return cache.snapshot;
+        })
+        .finally(() => {
+          if (pendingFetch && pendingFetch.conversationId === conversationId) pendingFetch = null;
+        });
+
+      pendingFetch = { conversationId, promise };
+      return promise;
+    }
+
+    function findRecordForTurn(turn, records) {
+      const list = records || (getCachedSnapshot() && getCachedSnapshot().messages) || [];
+      if (!turn || !list.length) return null;
+      return list.find((record) => recordMatchesTurn(record, turn)) || null;
+    }
+
+    return {
+      getCachedSnapshot,
+      refresh,
+      findRecordForTurn,
+      getRecordKey
+    };
+  })();
+
   // =============================================================================
   // Feature 1: Token Counter
   // =============================================================================
@@ -1068,6 +1436,7 @@
     const DUPLICATE_TRIGGER_WINDOW_MS = 140;
     let enabled = true;
     let prompts = [];
+    let promptRecords = [];
     let lastAnchor = null;
     let lastJumpTime = 0;
     let lastJumpTrigger = { source: '', direction: '', timestamp: 0 };
@@ -1075,11 +1444,13 @@
     let revertTimer = null;
     let refreshTimer = null;
     let scrollTimer = null;
+    let dataRefreshTimer = null;
 
     function scan() {
       const main = getConversationMain();
       if (!main) {
         prompts = [];
+        promptRecords = [];
         return [];
       }
       const turns = collectConversationTurns(main);
@@ -1092,13 +1463,43 @@
       prompts = userPrompts.length === 0 && turns.length > 0
         ? turns.filter((t) => isElementVisible(t))
         : userPrompts;
+
+      const snapshot = ConversationDataStore.getCachedSnapshot();
+      promptRecords = snapshot && snapshot.userMessages && snapshot.userMessages.length
+        ? snapshot.userMessages
+        : [];
       return prompts;
+    }
+
+    async function refreshConversationData(options = {}) {
+      const snapshot = await ConversationDataStore.refresh(options);
+      if (snapshot && snapshot.userMessages) {
+        promptRecords = snapshot.userMessages;
+      }
+      scan();
+      updateStatus();
+      return snapshot;
+    }
+
+    function scheduleConversationRefresh(force = false) {
+      if (dataRefreshTimer) clearTimeout(dataRefreshTimer);
+      dataRefreshTimer = setTimeout(() => {
+        dataRefreshTimer = null;
+        refreshConversationData({ force }).catch((error) => {
+          console.warn('PromptNav conversation refresh failed:', error);
+        });
+      }, force ? 50 : 500);
+    }
+
+    function getPromptTotal() {
+      return promptRecords.length || prompts.length;
     }
 
     function getScrollContext() {
       let container = null;
-      if (prompts.length > 0) {
-        let current = prompts[0].parentElement;
+      const scrollProbe = prompts[0] || getConversationMain();
+      if (scrollProbe) {
+        let current = scrollProbe.parentElement || scrollProbe;
         while (current) {
           const style = window.getComputedStyle(current);
           if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && current.scrollHeight > current.clientHeight) {
@@ -1115,6 +1516,19 @@
       }
       const rect = container.getBoundingClientRect();
       return { container, scrollTop: container.scrollTop, viewHeight: rect.height, containerTop: rect.top, isWindow: false };
+    }
+
+    function getMaxScroll(context) {
+      return Math.max(0, (context.isWindow ? document.documentElement.scrollHeight : context.container.scrollHeight) - context.viewHeight);
+    }
+
+    function setScrollTop(context, top, behavior = 'smooth') {
+      const target = Math.max(0, Math.min(top, getMaxScroll(context)));
+      if (context.isWindow) {
+        window.scrollTo({ top: target, behavior });
+      } else {
+        context.container.scrollTo({ top: target, behavior });
+      }
     }
 
     function buildAnchors(context) {
@@ -1208,7 +1622,130 @@
       }
     }
 
-    function jump(direction) {
+    function scrollToTurnElement(turn, context) {
+      const rect = turn.getBoundingClientRect();
+      const topY = context.scrollTop + (rect.top - context.containerTop);
+      scrollToAnchor({ element: turn, kind: 'top', y: topY, promptIndex: 0 }, context);
+    }
+
+    function getPromptIndexForMessageRecord(record) {
+      if (!record || !promptRecords.length) return -1;
+      if (record.role === 'user' && Number.isFinite(record.userIndex)) return record.userIndex;
+      let promptIndex = -1;
+      promptRecords.forEach((prompt, index) => {
+        if (prompt.index <= record.index) promptIndex = index;
+      });
+      return promptIndex;
+    }
+
+    function getMountedPromptObservation(targetIndex, context) {
+      const main = getConversationMain();
+      if (!main || !promptRecords.length) return null;
+      const thresholdY = context.scrollTop + (context.viewHeight / 2);
+      const observations = [];
+      collectConversationTurns(main).forEach((turn) => {
+        if (!isElementVisible(turn) || isReasoningOnlyTurn(turn)) return;
+        const record = ConversationDataStore.findRecordForTurn(turn);
+        const promptIndex = getPromptIndexForMessageRecord(record);
+        if (promptIndex < 0) return;
+        const rect = turn.getBoundingClientRect();
+        const topY = context.scrollTop + (rect.top - context.containerTop);
+        observations.push({ turn, record, promptIndex, topY });
+      });
+
+      if (!observations.length) return null;
+
+      let active = observations[0];
+      for (const observation of observations) {
+        if (observation.topY <= thresholdY) active = observation;
+      }
+
+      const closest = observations.reduce((best, observation) => {
+        if (!best) return observation;
+        return Math.abs(observation.promptIndex - targetIndex) < Math.abs(best.promptIndex - targetIndex)
+          ? observation
+          : best;
+      }, null);
+
+      return { active, closest, observations };
+    }
+
+    function findMountedTurnForPromptRecord(record) {
+      const main = getConversationMain();
+      if (!main || !record) return null;
+      const turns = collectConversationTurns(main);
+      return turns.find((turn) => isElementVisible(turn) && recordMatchesTurn(record, turn)) || null;
+    }
+
+    async function scrollToPromptRecord(record, targetIndex) {
+      const total = promptRecords.length;
+      let context = getScrollContext();
+      const maxScroll = getMaxScroll(context);
+      if (maxScroll <= 0) return false;
+
+      const ratio = total <= 1 ? 0 : targetIndex / (total - 1);
+      setScrollTop(context, maxScroll * ratio, 'smooth');
+
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        await delay(140 + attempt * 45);
+        scan();
+        context = getScrollContext();
+
+        const mounted = findMountedTurnForPromptRecord(record);
+        if (mounted) {
+          scrollToTurnElement(mounted, context);
+          lastAnchor = { element: mounted, kind: 'top' };
+          return true;
+        }
+
+        const observation = getMountedPromptObservation(targetIndex, context);
+        if (observation && observation.closest) {
+          const currentMax = getMaxScroll(context);
+          const closestIndex = observation.closest.promptIndex;
+          const deltaRatio = total <= 1 ? 0 : (targetIndex - closestIndex) / (total - 1);
+          const minStep = context.viewHeight * 0.65;
+          const rawDelta = deltaRatio * currentMax;
+          const direction = Math.sign(rawDelta);
+          const delta = direction === 0 ? 0 : Math.max(Math.abs(rawDelta), minStep) * direction;
+          setScrollTop(context, context.scrollTop + delta, 'auto');
+        } else {
+          setScrollTop(context, getMaxScroll(context) * ratio, 'auto');
+        }
+      }
+
+      return false;
+    }
+
+    async function jumpUsingConversationData(direction) {
+      const total = promptRecords.length;
+      if (!total) return { success: false, reason: 'no_prompts' };
+
+      let currentIndex = getCurrentPromptIndex();
+      if (currentIndex < 0) currentIndex = direction === 'previous' ? total : -1;
+
+      const targetIndex = direction === 'next' ? currentIndex + 1 : currentIndex - 1;
+      if (targetIndex < 0 || targetIndex >= total) {
+        return { success: false, reason: 'no_target' };
+      }
+
+      const targetRecord = promptRecords[targetIndex];
+      const context = getScrollContext();
+      const mounted = findMountedTurnForPromptRecord(targetRecord);
+      if (mounted) {
+        scrollToTurnElement(mounted, context);
+        lastAnchor = { element: mounted, kind: 'top' };
+        return { success: true, promptIndex: targetIndex, total };
+      }
+
+      const mountedAfterScroll = await scrollToPromptRecord(targetRecord, targetIndex);
+      return { success: true, promptIndex: targetIndex, total, virtualized: !mountedAfterScroll };
+    }
+
+    async function jump(direction) {
+      if (promptRecords.length) {
+        return jumpUsingConversationData(direction);
+      }
+
       if (!prompts.length) return { success: false, reason: 'no_prompts' };
       const context = getScrollContext();
       const anchors = buildAnchors(context);
@@ -1221,6 +1758,21 @@
     }
 
     function getCurrentPromptIndex() {
+      if (promptRecords.length) {
+        const context = getScrollContext();
+        const observation = getMountedPromptObservation(-1, context);
+        if (observation && observation.active) {
+          return observation.active.promptIndex;
+        }
+
+        const maxScroll = getMaxScroll(context);
+        if (maxScroll > 0) {
+          const ratio = Math.max(0, Math.min(1, context.scrollTop / maxScroll));
+          return Math.max(0, Math.min(promptRecords.length - 1, Math.round(ratio * (promptRecords.length - 1))));
+        }
+        return promptRecords.length ? 0 : -1;
+      }
+
       if (!prompts.length) return -1;
       const context = getScrollContext();
       const thresholdY = context.scrollTop + (context.viewHeight / 2);
@@ -1317,7 +1869,7 @@
 
     function updateStatus() {
       if (!widgetLabel || revertTimer) return;
-      const total = prompts.length;
+      const total = getPromptTotal();
       const currentIndex = getCurrentPromptIndex();
       if (total === 0) {
         widgetLabel.textContent = 'No Prompts';
@@ -1678,7 +2230,10 @@
         }
 
         scan();
-        const result = jump(direction);
+        if (!promptRecords.length) {
+          await refreshConversationData({ force: false });
+        }
+        const result = await jump(direction);
         if (result.success) {
           // Only increment usage for free tier users
           if (access.reason === 'free_tier') {
@@ -1729,6 +2284,7 @@
         refreshTimer = setTimeout(() => {
           scan();
           updateStatus();
+          scheduleConversationRefresh(false);
         }, 500);
       });
       observer.observe(document.body, { childList: true, subtree: true });
@@ -1764,6 +2320,7 @@
       }
       scan();
       updateStatus();
+      scheduleConversationRefresh(false);
     }
 
     function disable() {
@@ -1779,9 +2336,11 @@
       scan();
       updateStatus();
       setupObservers();
+      scheduleConversationRefresh(true);
       setInterval(() => {
         scan();
         updateStatus();
+        scheduleConversationRefresh(false);
       }, 2000);
     }
 
@@ -2510,6 +3069,9 @@
     let selectedTurns = new Map();
     let lastClickedIndex = -1;
     let allTurns = [];
+    let allMessages = [];
+    let selectionObserver = null;
+    let selectionSyncTimer = null;
     let currentFormat = 'plain';
     let currentDelimiter = { preset: 'newline', custom: '' };
 
@@ -2995,26 +3557,84 @@
       const main = getConversationMain();
       if (!main) {
         allTurns = [];
+        allMessages = [];
         return [];
       }
       const turns = collectConversationTurns(main);
       allTurns = turns.filter((t) => isElementVisible(t) && !isThinkingIndicator(t));
+      const snapshot = ConversationDataStore.getCachedSnapshot();
+      if (snapshot && snapshot.messages && snapshot.messages.length) {
+        allMessages = snapshot.messages;
+      } else {
+        allMessages = allTurns
+          .map((turn, index) => createDomMessageRecord(turn, index))
+          .filter(Boolean)
+          .map((record, index) => ({ ...record, index }));
+      }
       return allTurns;
+    }
+
+    function getMessageForTurn(turn, mountedIndex) {
+      const record = ConversationDataStore.findRecordForTurn(turn, allMessages);
+      if (record) return record;
+      return createDomMessageRecord(turn, mountedIndex);
+    }
+
+    function getMessageByKey(key) {
+      if (!key) return null;
+      return allMessages.find((message) => getRecordKey(message) === key) || null;
+    }
+
+    function setRenderedSelectionForKey(key, selected) {
+      allTurns.forEach((turn) => {
+        const checkbox = turn.querySelector(`.${CHECKBOX_CLASS}`);
+        if (!checkbox || checkbox.dataset.key !== key) return;
+        checkbox.classList.toggle('checked', selected);
+        turn.classList.toggle(SELECTED_CLASS, selected);
+      });
+    }
+
+    function syncRenderedSelectionState() {
+      allTurns.forEach((turn, index) => {
+        const message = getMessageForTurn(turn, index);
+        const key = getRecordKey(message);
+        const selected = key && selectedTurns.has(key);
+        const checkbox = turn.querySelector(`.${CHECKBOX_CLASS}`);
+        if (checkbox && key) {
+          checkbox.dataset.key = key;
+          checkbox.dataset.index = String(message.index);
+          checkbox.classList.toggle('checked', selected);
+        }
+        turn.classList.toggle(SELECTED_CLASS, !!selected);
+      });
     }
 
     function addCheckboxes() {
       allTurns.forEach((turn, index) => {
-        if (turn.querySelector(`.${CHECKBOX_CLASS}`)) return;
+        const message = getMessageForTurn(turn, index);
+        if (!message) return;
+        const key = getRecordKey(message);
+        if (!key) return;
+
+        let checkbox = turn.querySelector(`.${CHECKBOX_CLASS}`);
+        if (checkbox) {
+          checkbox.dataset.key = key;
+          checkbox.dataset.index = String(message.index);
+          return;
+        }
+
         turn.style.position = 'relative';
-        const checkbox = document.createElement('div');
+        checkbox = document.createElement('div');
         checkbox.className = CHECKBOX_CLASS;
-        checkbox.dataset.index = index;
+        checkbox.dataset.key = key;
+        checkbox.dataset.index = String(message.index);
         checkbox.addEventListener('click', (e) => {
           e.stopPropagation();
-          handleTurnClick(index, e.shiftKey);
+          handleTurnClick(checkbox.dataset.key, e.shiftKey);
         });
         turn.appendChild(checkbox);
       });
+      syncRenderedSelectionState();
     }
 
     function removeCheckboxes() {
@@ -3022,88 +3642,103 @@
       document.querySelectorAll(`.${SELECTED_CLASS}`).forEach((el) => el.classList.remove(SELECTED_CLASS));
     }
 
-    function handleTurnClick(index, isShiftClick) {
+    function handleTurnClick(key, isShiftClick) {
+      const message = getMessageByKey(key);
+      if (!message) return;
+      const index = message.index;
       if (isShiftClick && lastClickedIndex >= 0) {
         const start = Math.min(lastClickedIndex, index);
         const end = Math.max(lastClickedIndex, index);
         for (let i = start; i <= end; i++) {
-          selectTurn(i);
+          selectMessageAtIndex(i);
         }
       } else {
-        toggleTurn(index);
+        toggleMessage(key);
       }
       lastClickedIndex = index;
       updateUI();
     }
 
-    function toggleTurn(index) {
-      const turn = allTurns[index];
-      if (!turn) return;
-      if (selectedTurns.has(turn)) {
-        selectedTurns.delete(turn);
-        turn.classList.remove(SELECTED_CLASS);
-        const cb = turn.querySelector(`.${CHECKBOX_CLASS}`);
-        if (cb) cb.classList.remove('checked');
+    function toggleMessage(key) {
+      if (!key) return;
+      if (selectedTurns.has(key)) {
+        selectedTurns.delete(key);
+        setRenderedSelectionForKey(key, false);
       } else {
-        selectTurn(index);
+        selectMessageByKey(key);
       }
     }
 
-    function selectTurn(index) {
-      const turn = allTurns[index];
-      if (!turn || selectedTurns.has(turn)) return;
-      const role = determineMessageRole(turn, index);
-      const text = extractTurnText(turn);
-      const tokens = estimator ? estimator.estimateTokensFromText(text).tokens : 0;
-      selectedTurns.set(turn, { index, role, text, tokens });
-      turn.classList.add(SELECTED_CLASS);
-      const cb = turn.querySelector(`.${CHECKBOX_CLASS}`);
-      if (cb) cb.classList.add('checked');
+    function selectMessageByKey(key) {
+      const message = getMessageByKey(key);
+      if (!message || selectedTurns.has(key)) return;
+      const tokens = estimator ? estimator.estimateTokensFromText(message.text).tokens : 0;
+      selectedTurns.set(key, {
+        index: message.index,
+        role: message.role,
+        text: message.text,
+        tokens,
+        key
+      });
+      setRenderedSelectionForKey(key, true);
     }
 
-    function extractTurnText(turn) {
-      return extractMessageTextFromTurn(turn, '.cc-checkbox-overlay');
+    function selectMessageAtIndex(index) {
+      const message = allMessages[index];
+      if (!message) return;
+      selectMessageByKey(getRecordKey(message));
     }
 
     function clearSelection() {
-      selectedTurns.forEach((_, turn) => {
-        turn.classList.remove(SELECTED_CLASS);
-        const cb = turn.querySelector(`.${CHECKBOX_CLASS}`);
-        if (cb) cb.classList.remove('checked');
-      });
       selectedTurns.clear();
       lastClickedIndex = -1;
+      syncRenderedSelectionState();
       updateUI();
     }
 
-    function selectAll() {
-      allTurns.forEach((_, i) => selectTurn(i));
+    async function ensureFullMessagesLoaded() {
+      const snapshot = await ConversationDataStore.refresh({ force: false });
+      if (snapshot && snapshot.messages && snapshot.messages.length) {
+        scanTurns();
+        addCheckboxes();
+      }
+      return allMessages;
+    }
+
+    async function selectAll() {
+      await ensureFullMessagesLoaded();
+      allMessages.forEach((_, i) => selectMessageAtIndex(i));
       updateUI();
     }
 
-    function selectLast(n) {
+    async function selectLast(n) {
+      await ensureFullMessagesLoaded();
       clearSelection();
-      const start = Math.max(0, allTurns.length - n);
-      for (let i = start; i < allTurns.length; i++) {
-        selectTurn(i);
+      const start = Math.max(0, allMessages.length - n);
+      for (let i = start; i < allMessages.length; i++) {
+        selectMessageAtIndex(i);
       }
       updateUI();
     }
 
-    function selectByRole(role) {
+    async function selectByRole(role) {
+      await ensureFullMessagesLoaded();
       clearSelection();
-      allTurns.forEach((turn, i) => {
-        const turnRole = determineMessageRole(turn, i);
-        if (turnRole === role) selectTurn(i);
+      allMessages.forEach((message, i) => {
+        if (message.role === role) selectMessageAtIndex(i);
       });
       updateUI();
+    }
+
+    function getSortedSelectedMessages() {
+      return Array.from(selectedTurns.values())
+        .sort((a, b) => a.index - b.index);
     }
 
     function generatePreview(format) {
       if (selectedTurns.size === 0) return '';
-      const sorted = Array.from(selectedTurns.entries())
-        .sort((a, b) => a[1].index - b[1].index);
-      const first = sorted[0][1];
+      const sorted = getSortedSelectedMessages();
+      const first = sorted[0];
       const roleLabel = first.role === 'user' ? 'User' : 'Assistant';
       const snippet = first.text.substring(0, 18).replace(/\n/g, ' ').trim();
       const hasMore = sorted.length > 1;
@@ -3124,12 +3759,11 @@
     }
 
     function formatOutputAs(format) {
-      const sorted = Array.from(selectedTurns.entries())
-        .sort((a, b) => a[1].index - b[1].index);
+      const sorted = getSortedSelectedMessages();
       const delimiter = getDelimiterValue();
 
       if (format === 'plain') {
-        return sorted.map(([_, data]) => {
+        return sorted.map((data) => {
           const roleLabel = data.role === 'user' ? 'User' : 'Assistant';
           return `${roleLabel}:\n${data.text}`;
         }).join(delimiter);
@@ -3137,7 +3771,7 @@
 
       if (format === 'json') {
         // OpenAI API format
-        const messages = sorted.map(([_, data]) => ({
+        const messages = sorted.map((data) => ({
           role: data.role,
           content: data.text
         }));
@@ -3146,7 +3780,7 @@
 
       if (format === 'xml') {
         // Clean XML with <user> and <assistant> tags
-        const messages = sorted.map(([_, data]) => {
+        const messages = sorted.map((data) => {
           const tag = data.role === 'user' ? 'user' : 'assistant';
           return `<${tag}>\n${data.text}\n</${tag}>`;
         }).join('\n');
@@ -3210,7 +3844,11 @@
         const btn = document.createElement('button');
         btn.className = 'cc-quick-btn';
         btn.textContent = label;
-        btn.addEventListener('click', action);
+        btn.addEventListener('click', () => {
+          Promise.resolve(action()).catch((error) => {
+            console.error('Context Collector action failed:', error);
+          });
+        });
         quickRow.appendChild(btn);
       });
       quickSection.appendChild(quickLabel);
@@ -3340,6 +3978,37 @@
       if (panel) panel.remove();
     }
 
+    function scheduleSelectionSync() {
+      if (!selectionMode) return;
+      if (selectionSyncTimer) clearTimeout(selectionSyncTimer);
+      selectionSyncTimer = setTimeout(() => {
+        selectionSyncTimer = null;
+        scanTurns();
+        addCheckboxes();
+        updateUI();
+      }, 150);
+    }
+
+    function startSelectionObserver() {
+      if (!selectionObserver) {
+        selectionObserver = new MutationObserver(scheduleSelectionSync);
+        selectionObserver.observe(document.body, { childList: true, subtree: true });
+      }
+      window.addEventListener('scroll', scheduleSelectionSync, { capture: true, passive: true });
+    }
+
+    function stopSelectionObserver() {
+      if (selectionObserver) {
+        selectionObserver.disconnect();
+        selectionObserver = null;
+      }
+      window.removeEventListener('scroll', scheduleSelectionSync, { capture: true });
+      if (selectionSyncTimer) {
+        clearTimeout(selectionSyncTimer);
+        selectionSyncTimer = null;
+      }
+    }
+
     function setFormat(fmt) {
       currentFormat = fmt;
       saveFormatPreference(fmt);
@@ -3375,7 +4044,9 @@
 
       stats.textContent = '';
       if (count === 0) {
-        stats.textContent = 'Click checkboxes to select messages';
+        stats.textContent = allMessages.length
+          ? `${allMessages.length} message${allMessages.length === 1 ? '' : 's'} loaded`
+          : 'Click checkboxes to select messages';
       } else {
         const countStrong = document.createElement('strong');
         countStrong.textContent = count;
@@ -3433,13 +4104,23 @@
       scanTurns();
       addCheckboxes();
       createPanel();
+      startSelectionObserver();
       const fab = document.getElementById(FAB_ID);
       if (fab) fab.classList.add('active');
       updateUI();
+      ensureFullMessagesLoaded().then(() => {
+        if (!selectionMode) return;
+        scanTurns();
+        addCheckboxes();
+        updateUI();
+      }).catch((error) => {
+        console.warn('Context Collector full-message load failed:', error);
+      });
     }
 
     function exitSelectionMode() {
       selectionMode = false;
+      stopSelectionObserver();
       removeCheckboxes();
       removePanel();
       selectedTurns.clear();
