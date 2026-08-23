@@ -23,6 +23,14 @@ chrome.runtime.onInstalled.addListener((details) => {
     });
     // Open welcome tab on first install
     chrome.tabs.create({ url: 'popup.html' });
+  } else if (details.reason === 'update') {
+    // 1.1.0 removed the paid tier; clear leftover license/usage storage.
+    chrome.storage.sync.remove([
+      'promptNavLicenseKey',
+      'promptNavUsageCount',
+      'promptNavLicenseValid',
+      'promptNavLastValidated'
+    ]);
   }
 });
 

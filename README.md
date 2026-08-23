@@ -70,13 +70,16 @@ Tip: Keyboard shortcuts can be customized in Chrome at `chrome://extensions/shor
 
 ## Version Notes
 
+### 1.1.0 (2026-08-23)
+- Removed the paid tier: Rapid Prompt Navigation is now unlimited and free for everyone. The license UI, usage counter, upgrade modal, and the `api.polar.sh` host permission are gone; leftover license storage is cleared on update.
+
 ### 1.0.8 (2026-08-22)
 - Fixed **Context Collector** copy output silently including ChatGPT tool calls (web search queries, Python code, agent/browser actions, canvas payloads) and agent interim progress notes as assistant messages.
 - Stripped ChatGPT's inline citation/navlist marker glyphs from copied text.
 - Fixed the full-conversation fetch added in 1.0.7: the backend answers an unauthenticated request with 404, so the fetch never succeeded and every feature fell back to the virtualized, markdown-stripped DOM. Copied text now carries the original markdown.
 - **Message datetimes** and the session tracker's chatStart/lastPrompt now read times from the conversation payload; they previously depended on React internals a content script cannot see and never rendered.
 - Completion chime detects the current stop-control markup.
-- Internals: `shared.js` holds settings defaults, chime presets, and license helpers once; a single visible-turn scanner serves every feature.
+- Internals: `shared.js` holds settings defaults and chime presets once; a single visible-turn scanner serves every feature.
 
 ### 1.0.7 (2026-06-03)
 - Restored **Rapid Prompt Navigation** and **Context Collector** behavior for ChatGPT conversations whose message DOM is virtualized as you scroll.
@@ -123,16 +126,13 @@ This creates:
 - Open **ChatGPT UX Suite**, then upload a new version with `chatgpt_ux_suite_firefox.zip`
 - For a brand new listing: https://addons.mozilla.org/en-US/developers/addon/submit/
 
-## Pricing / Licensing
+## Pricing
 
-Prompt Navigator includes a free tier (30 navigations). Unlimited prompt navigation can be unlocked via a one-time purchase (license key validated via Polar).
-
-All other features are included.
+All features are free and unlimited.
 
 ## Privacy
 
 - Conversation parsing/token estimation happens locally in your browser.
-- If you enter a license key, the extension may contact Polar (`api.polar.sh`) to validate it (no chat content is sent).
 
 ## Disclaimer
 

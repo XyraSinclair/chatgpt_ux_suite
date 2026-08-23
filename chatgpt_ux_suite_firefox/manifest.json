@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "ChatGPT UX Suite",
   "short_name": "GPT UX",
-  "version": "1.0.8",
+  "version": "1.1.0",
   "description": "Prompt navigation, token counter, session tracking, message datetimes, context export, styling, and sound alerts for ChatGPT.",
   "browser_specific_settings": {
     "gecko": {
@@ -25,8 +25,7 @@
   ],
   "host_permissions": [
     "https://chatgpt.com/*",
-    "https://chat.openai.com/*",
-    "https://api.polar.sh/*"
+    "https://chat.openai.com/*"
   ],
   "action": {
     "default_popup": "popup.html",
