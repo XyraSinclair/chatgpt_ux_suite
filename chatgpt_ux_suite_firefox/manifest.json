@@ -3,7 +3,7 @@
   "name": "ChatGPT UX Suite",
   "short_name": "GPT UX",
   "version": "1.0.8",
-  "description": "Rapid prompt navigation, token counter, session tracking, message datetimes, context export, styling, and sound notifications for ChatGPT.",
+  "description": "Prompt navigation, token counter, session tracking, message datetimes, context export, styling, and sound alerts for ChatGPT.",
   "browser_specific_settings": {
     "gecko": {
       "id": "chatgpt-ux-suite@xyra.dev",
