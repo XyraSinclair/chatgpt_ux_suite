@@ -71,8 +71,12 @@ Tip: Keyboard shortcuts can be customized in Chrome at `chrome://extensions/shor
 ## Version Notes
 
 ### 1.0.8 (2026-08-22)
-- Fixed **Context Collector** copy output silently including ChatGPT tool calls (web search queries, Python code, agent/browser actions, canvas payloads) as assistant messages.
+- Fixed **Context Collector** copy output silently including ChatGPT tool calls (web search queries, Python code, agent/browser actions, canvas payloads) and agent interim progress notes as assistant messages.
 - Stripped ChatGPT's inline citation/navlist marker glyphs from copied text.
+- Fixed the full-conversation fetch added in 1.0.7: the backend answers an unauthenticated request with 404, so the fetch never succeeded and every feature fell back to the virtualized, markdown-stripped DOM. Copied text now carries the original markdown.
+- **Message datetimes** and the session tracker's chatStart/lastPrompt now read times from the conversation payload; they previously depended on React internals a content script cannot see and never rendered.
+- Completion chime detects the current stop-control markup.
+- Internals: `shared.js` holds settings defaults, chime presets, and license helpers once; a single visible-turn scanner serves every feature.
 
 ### 1.0.7 (2026-06-03)
 - Restored **Rapid Prompt Navigation** and **Context Collector** behavior for ChatGPT conversations whose message DOM is virtualized as you scroll.
