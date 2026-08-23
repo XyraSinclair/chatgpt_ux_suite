@@ -526,17 +526,36 @@
       if (name) pieces.push(`[Attachment: ${name}]`);
     });
 
-    return pieces
-      .map((piece) => String(piece).trim())
-      .filter(Boolean)
-      .join('\n')
-      .trim();
+    return stripConversationMarkup(
+      pieces
+        .map((piece) => String(piece).trim())
+        .filter(Boolean)
+        .join('\n')
+    ).trim();
+  }
+
+  // ChatGPT encodes citations, nav lists, and image groups inline as
+  // private-use-area spans (\ue200 ... \ue201, fields split by \ue202). The site
+  // renders them as chips; in copied text they are garbage.
+  function stripConversationMarkup(text) {
+    return String(text || '')
+      .replace(/\ue200[\s\S]*?\ue201/g, '')
+      .replace(/[\ue000-\uf8ff]/g, '')
+      .replace(/[ \t]+\n/g, '\n');
   }
 
   function shouldIncludeConversationMessage(message) {
     if (!message || typeof message !== 'object') return false;
     const role = message.author && message.author.role;
     if (role !== 'user' && role !== 'assistant') return false;
+
+    // Tool calls (web.run, python, computer.*, canmore.*) are assistant-authored
+    // but addressed to a tool, not to the user. Visible turns are always
+    // recipient "all" with text/multimodal_text content.
+    const recipient = message.recipient || 'all';
+    if (recipient !== 'all') return false;
+    const contentType = message.content && message.content.content_type;
+    if (contentType && contentType !== 'text' && contentType !== 'multimodal_text') return false;
 
     const metadata = message.metadata || {};
     if (

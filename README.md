@@ -70,6 +70,10 @@ Tip: Keyboard shortcuts can be customized in Chrome at `chrome://extensions/shor
 
 ## Version Notes
 
+### 1.0.8 (2026-08-22)
+- Fixed **Context Collector** copy output silently including ChatGPT tool calls (web search queries, Python code, agent/browser actions, canvas payloads) as assistant messages.
+- Stripped ChatGPT's inline citation/navlist marker glyphs from copied text.
+
 ### 1.0.7 (2026-06-03)
 - Restored **Rapid Prompt Navigation** and **Context Collector** behavior for ChatGPT conversations whose message DOM is virtualized as you scroll.
 - Added a full-conversation data cache backed by ChatGPT's same-origin conversation payload, with rendered DOM parsing retained as a fallback.
