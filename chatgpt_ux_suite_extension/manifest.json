@@ -39,6 +39,7 @@
         "https://chat.openai.com/*"
       ],
       "js": [
+        "shared.js",
         "tokenEstimator.js",
         "unifiedContentScript.js"
       ],

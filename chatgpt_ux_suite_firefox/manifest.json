@@ -39,7 +39,7 @@
     "default_title": "ChatGPT UX Suite Settings"
   },
   "background": {
-    "scripts": ["serviceWorkerBackground.js"]
+    "scripts": ["shared.js", "serviceWorkerBackground.js"]
   },
   "content_scripts": [
     {
@@ -48,6 +48,7 @@
         "https://chat.openai.com/*"
       ],
       "js": [
+        "shared.js",
         "tokenEstimator.js",
         "unifiedContentScript.js"
       ],

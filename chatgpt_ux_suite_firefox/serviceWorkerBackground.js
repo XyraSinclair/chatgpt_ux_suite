@@ -1,5 +1,8 @@
 'use strict';
 
+// Firefox lists shared.js in background.scripts; Chrome's worker imports it.
+if (typeof importScripts === 'function') importScripts('shared.js');
+
 /**
  * ChatGPT UX Suite - Background Service Worker
  * Handles keyboard command routing and settings management
@@ -11,16 +14,6 @@ const PROMPT_NAV_COMMANDS = {
 };
 
 const CHATGPT_ORIGINS = ['https://chatgpt.com/', 'https://chat.openai.com/'];
-
-const DEFAULT_SETTINGS = {
-  tokenCounter: true,
-  promptNavigator: true,
-  responseStyling: true,
-  sessionTracker: true,
-  contextCollector: true,
-  chatTimestamps: false,
-  soundNotification: false
-};
 
 // Initialize default settings on install
 chrome.runtime.onInstalled.addListener((details) => {

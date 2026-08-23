@@ -64,19 +64,13 @@
 
     const words = countWords(cleaned);
     const characters = cleaned.replace(/\s+/g, '').length;
-    const graphemes = Array.from(cleaned).length;
 
     const byWord = Math.ceil((words || 1) * WORD_TOKEN_MULTIPLIER);
     const byCharacter = Math.ceil(characters / CHARS_PER_TOKEN);
     const blended = Math.round((byWord * 0.4) + (byCharacter * 0.6));
     const tokens = Math.max(1, Math.max(byWord, byCharacter, blended));
 
-    return {
-      tokens,
-      words,
-      characters,
-      graphemes
-    };
+    return { tokens, words, characters };
   }
 
   function estimateTokensFromBytes(bytes) {

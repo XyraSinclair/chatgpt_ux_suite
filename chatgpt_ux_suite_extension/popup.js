@@ -2,57 +2,8 @@
 
 const FEATURE_KEYS = ['tokenCounter', 'promptNavigator', 'responseStyling', 'sessionTracker', 'contextCollector', 'chatTimestamps', 'soundNotification'];
 
-const DEFAULT_SETTINGS = {
-  tokenCounter: true,
-  promptNavigator: true,
-  responseStyling: true,
-  sessionTracker: true,
-  contextCollector: true,
-  chatTimestamps: false,
-  soundNotification: false
-};
-
-// Chime presets - designed for pleasant, luxurious notification sounds
-// All use low frequencies, consonant intervals, and reduced volume for comfort
-const CHIME_PRESETS = {
-  aurora: {
-    // Very low ascending fifth (G2→D3) - deep, ethereal
-    note1: 98.00, note2: 146.83,
-    duration: 0.6, attack: 0.04, decay: 0.55, volume: 0.14
-  },
-  ocean: {
-    // Low perfect fifth (G2→D3) then up - rolling, calm
-    note1: 98.00, note2: 130.81,
-    duration: 0.6, attack: 0.05, decay: 0.55, volume: 0.14
-  },
-  velvet: {
-    // Low descending third (E3→C3) - smooth, gentle
-    note1: 164.81, note2: 130.81,
-    duration: 0.55, attack: 0.04, decay: 0.5, volume: 0.16
-  },
-  chime: {
-    // Classic perfect fifth (C3→G3) - clear, bright
-    note1: 130.81, note2: 196.00,
-    duration: 0.55, attack: 0.03, decay: 0.5, volume: 0.18
-  }
-};
-
-const DEFAULT_CHIME = 'chime';
-
-// License management constants
-const POLAR_ORG_ID = 'f88eadc1-f584-4ae6-a6be-b511e014f825';
-const FREE_NAVIGATIONS = 30;
-const KEY_PREFIX = 'key_';
-const BYPASS_LICENSE_KEY = 'DEV_BYPASS';
-const BYPASS_KEY_ALIASES = new Set([BYPASS_LICENSE_KEY, 'DEV-BYPASS']);
 const BACKDOOR_CLICKS_REQUIRED = 5;
 const BACKDOOR_CLICK_WINDOW_MS = 6000;
-const LICENSE_STORAGE_KEYS = {
-  licenseKey: 'promptNavLicenseKey',
-  usageCount: 'promptNavUsageCount',
-  licenseValid: 'promptNavLicenseValid',
-  lastValidated: 'promptNavLastValidated'
-};
 
 async function loadSettings() {
   return new Promise((resolve) => {
@@ -89,52 +40,6 @@ async function getLicenseData() {
   });
 }
 
-function normalizeLicenseKey(rawKey) {
-  if (typeof rawKey !== 'string') return '';
-  let key = rawKey.trim();
-  if (!key) return '';
-
-  if (/^https?:\/\//i.test(key)) {
-    try {
-      const url = new URL(key);
-      const keyFromUrl = url.searchParams.get('license_key')
-        || url.searchParams.get('licenseKey')
-        || url.searchParams.get('key');
-      if (keyFromUrl) key = keyFromUrl.trim();
-    } catch (e) {
-      // Ignore malformed URLs and keep original input.
-    }
-  }
-
-  return key
-    .replace(/^(license\s*key|license|key)\s*[:=#-]\s*/i, '')
-    .replace(/\s+/g, '');
-}
-
-function isBypassLicenseKey(key) {
-  if (!key) return false;
-  return BYPASS_KEY_ALIASES.has(String(key).trim().toUpperCase());
-}
-
-function getLicenseCandidates(normalizedKey) {
-  const candidates = [];
-  const seen = new Set();
-  const add = (candidate) => {
-    if (!candidate || seen.has(candidate)) return;
-    seen.add(candidate);
-    candidates.push(candidate);
-  };
-
-  add(normalizedKey);
-  if (normalizedKey.toLowerCase().startsWith(KEY_PREFIX) && normalizedKey.length > KEY_PREFIX.length) {
-    add(normalizedKey.slice(KEY_PREFIX.length));
-  } else {
-    add(`${KEY_PREFIX}${normalizedKey}`);
-  }
-
-  return candidates;
-}
-
 function getManifestVersionLabel() {
   try {
     const version = chrome.runtime.getManifest().version;
@@ -142,53 +47,6 @@ function getManifestVersionLabel() {
   } catch (e) {
     return 'v...';
   }
-}
-
-async function validateLicenseWithPolar(rawKey) {
-  const normalizedKey = normalizeLicenseKey(rawKey);
-  if (!normalizedKey) {
-    return { isValid: false, key: '', transientError: false };
-  }
-
-  if (isBypassLicenseKey(normalizedKey)) {
-    return { isValid: true, key: BYPASS_LICENSE_KEY, transientError: false };
-  }
-
-  const candidates = getLicenseCandidates(normalizedKey);
-  let transientError = false;
-  let hadDefinitiveInvalidResponse = false;
-
-  for (const candidate of candidates) {
-    try {
-      const response = await fetch('https://api.polar.sh/v1/customer-portal/license-keys/validate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          key: candidate,
-          organization_id: POLAR_ORG_ID
-        })
-      });
-      if (!response.ok) {
-        if (response.status >= 500 || response.status === 429) {
-          transientError = true;
-        } else {
-          hadDefinitiveInvalidResponse = true;
-        }
-        continue;
-      }
-      const data = await response.json();
-      // API returns a ValidatedLicenseKey object - check status is 'granted'
-      if (data.status === 'granted') {
-        return { isValid: true, key: candidate, transientError: false };
-      }
-      hadDefinitiveInvalidResponse = true;
-    } catch (e) {
-      transientError = true;
-      console.error('License validation error:', e);
-    }
-  }
-
-  return { isValid: false, key: normalizedKey, transientError: transientError && !hadDefinitiveInvalidResponse };
 }
 
 function setPromptShortcutHint() {
@@ -222,57 +80,6 @@ function updateCardState(feature, enabled) {
       card.classList.add('disabled');
       card.classList.remove('enabled');
     }
-  }
-}
-
-// Play a luxurious chime sound with harmonics for richness
-function playChimePreview(presetName) {
-  const preset = CHIME_PRESETS[presetName] || CHIME_PRESETS[DEFAULT_CHIME];
-  const vol = preset.volume || 0.15;
-
-  try {
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const now = audioContext.currentTime;
-
-    // Create main oscillator (sine for smooth tone)
-    const osc1 = audioContext.createOscillator();
-    const gain1 = audioContext.createGain();
-    osc1.type = 'sine';
-    osc1.connect(gain1);
-    gain1.connect(audioContext.destination);
-
-    // Add subtle harmonic (one octave up, quieter) for richness
-    const osc2 = audioContext.createOscillator();
-    const gain2 = audioContext.createGain();
-    osc2.type = 'sine';
-    osc2.connect(gain2);
-    gain2.connect(audioContext.destination);
-
-    // First note
-    osc1.frequency.setValueAtTime(preset.note1, now);
-    osc2.frequency.setValueAtTime(preset.note1 * 2, now); // octave harmonic
-
-    // Second note
-    const noteSwitch = now + preset.duration * 0.4;
-    osc1.frequency.setValueAtTime(preset.note2, noteSwitch);
-    osc2.frequency.setValueAtTime(preset.note2 * 2, noteSwitch);
-
-    // Smooth envelope - soft attack, gentle decay (using preset volume)
-    gain1.gain.setValueAtTime(0, now);
-    gain1.gain.linearRampToValueAtTime(vol, now + preset.attack);
-    gain1.gain.exponentialRampToValueAtTime(0.001, now + preset.duration);
-
-    // Harmonic envelope (much quieter for subtle warmth)
-    gain2.gain.setValueAtTime(0, now);
-    gain2.gain.linearRampToValueAtTime(vol * 0.25, now + preset.attack);
-    gain2.gain.exponentialRampToValueAtTime(0.001, now + preset.duration);
-
-    osc1.start(now);
-    osc2.start(now);
-    osc1.stop(now + preset.duration);
-    osc2.stop(now + preset.duration);
-  } catch (e) {
-    console.log('Could not play chime:', e);
   }
 }
 
@@ -445,7 +252,7 @@ async function initializePopup() {
         await saveSelectedChime(chimeName);
 
         // Play preview
-        playChimePreview(chimeName);
+        playChime(chimeName);
 
         // Notify content script
         notifyContentScripts({ type: 'CHIME_CHANGED', chime: chimeName });

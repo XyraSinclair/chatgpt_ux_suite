@@ -12,51 +12,8 @@
   // =============================================================================
   // Settings Management
   // =============================================================================
-  const DEFAULT_SETTINGS = {
-    tokenCounter: true,
-    promptNavigator: true,
-    responseStyling: true,
-    sessionTracker: true,
-    contextCollector: true,
-    chatTimestamps: false,
-    soundNotification: false
-  };
-
-  // Chime presets - designed for pleasant, luxurious notification sounds
-  // All use low frequencies, consonant intervals, and reduced volume for comfort
-  const CHIME_PRESETS = {
-    aurora: {
-      // Very low ascending fifth (G2→D3) - deep, ethereal
-      note1: 98.00, note2: 146.83,
-      duration: 0.6, attack: 0.04, decay: 0.55, volume: 0.14
-    },
-    forest: {
-      // Low ascending fourth (C3→F3) - natural, woody
-      note1: 130.81, note2: 174.61,
-      duration: 0.55, attack: 0.03, decay: 0.5, volume: 0.17
-    },
-    ocean: {
-      // Low perfect fifth (G2→D3) then up - rolling, calm
-      note1: 98.00, note2: 130.81,
-      duration: 0.6, attack: 0.05, decay: 0.55, volume: 0.14
-    },
-    velvet: {
-      // Low descending third (E3→C3) - smooth, gentle
-      note1: 164.81, note2: 130.81,
-      duration: 0.55, attack: 0.04, decay: 0.5, volume: 0.16
-    },
-    ember: {
-      // Very low octave hint (A2→A2*1.5) - warm, glowing
-      note1: 110.00, note2: 165.00,
-      duration: 0.5, attack: 0.03, decay: 0.45, volume: 0.17
-    },
-    chime: {
-      // Classic perfect fifth (C3→G3) - clear, bright
-      note1: 130.81, note2: 196.00,
-      duration: 0.55, attack: 0.03, decay: 0.5, volume: 0.18
-    }
-  };
-  const DEFAULT_CHIME = 'chime';
+  // DEFAULT_SETTINGS, CHIME_PRESETS, DEFAULT_CHIME and the license helpers are
+  // globals from shared.js (loaded first by the manifest).
   let selectedChime = DEFAULT_CHIME;
 
   let currentSettings = { ...DEFAULT_SETTINGS };
@@ -233,84 +190,23 @@
     return text;
   }
 
+  /**
+   * Visible conversation turns with their role, in document order.
+   * Reasoning-only turns ("Thought for 12s") are dropped unless asked for.
+   */
+  function getRenderedTurns({ includeReasoning = false } = {}) {
+    const main = getConversationMain();
+    if (!main) return [];
+    return collectConversationTurns(main)
+      .map((turn, index) => ({ turn, index, role: determineMessageRole(turn, index) }))
+      .filter(({ turn }) => isElementVisible(turn) && (includeReasoning || !isReasoningOnlyTurn(turn)));
+  }
+
   function normalizeUnixTimestampMs(value) {
     const numeric = typeof value === 'number' ? value : Number(value);
     if (!Number.isFinite(numeric) || numeric <= 0) return null;
     // ChatGPT message create_time is typically in seconds.
     return numeric > 1e12 ? Math.round(numeric) : Math.round(numeric * 1000);
-  }
-
-  function findReactFiberNode(target) {
-    if (!target || typeof target !== 'object') return null;
-    const fiberKey = Object.keys(target).find((key) => key.startsWith('__reactFiber$'));
-    return fiberKey ? target[fiberKey] : null;
-  }
-
-  function extractCreateTimeMsFromFiber(rootFiber) {
-    if (!rootFiber || typeof rootFiber !== 'object') return null;
-
-    const queue = [rootFiber];
-    const seen = new Set();
-    let inspected = 0;
-
-    while (queue.length && inspected < 320) {
-      const node = queue.shift();
-      if (!node || typeof node !== 'object' || seen.has(node)) continue;
-      seen.add(node);
-      inspected++;
-
-      const direct = normalizeUnixTimestampMs(node.create_time);
-      if (direct) return direct;
-
-      const propsCandidates = [node.memoizedProps, node.pendingProps, node.props];
-      for (const props of propsCandidates) {
-        if (!props || typeof props !== 'object') continue;
-
-        const propsDirect = normalizeUnixTimestampMs(props.create_time);
-        if (propsDirect) return propsDirect;
-
-        const messageDirect = normalizeUnixTimestampMs(props.message && props.message.create_time);
-        if (messageDirect) return messageDirect;
-
-        if (Array.isArray(props.messages)) {
-          for (const message of props.messages) {
-            const ts = normalizeUnixTimestampMs(message && message.create_time);
-            if (ts) return ts;
-          }
-        }
-      }
-
-      // Traverse nearby React fibers first.
-      if (node.return) queue.push(node.return);
-      if (node.child) queue.push(node.child);
-      if (node.sibling) queue.push(node.sibling);
-    }
-
-    return null;
-  }
-
-  function getTurnIdentity(turn, source) {
-    if (!turn || typeof turn.getAttribute !== 'function') return null;
-
-    const sourceId =
-      source &&
-      typeof source.getAttribute === 'function' &&
-      source.getAttribute('data-message-id');
-    if (sourceId) return `mid:${sourceId}`;
-
-    const turnId = turn.getAttribute('data-message-id');
-    if (turnId) return `mid:${turnId}`;
-
-    const sourceTestId =
-      source &&
-      typeof source.getAttribute === 'function' &&
-      source.getAttribute('data-testid');
-    if (sourceTestId) return `tid:${sourceTestId}`;
-
-    const turnTestId = turn.getAttribute('data-testid');
-    if (turnTestId) return `tid:${turnTestId}`;
-
-    return null;
   }
 
   function extractTimestampFromTimeElement(turn) {
@@ -324,57 +220,13 @@
     return Math.round(parsed);
   }
 
+  // Message times come from the conversation payload; the rendered DOM carries
+  // none a content script can read (React's fiber expandos live in the page
+  // world), so a <time> element is the only DOM fallback.
   function getTurnTimestampMs(turn) {
-    if (!turn || typeof turn !== 'object') return null;
-
-    const source = (typeof turn.matches === 'function' && turn.matches('[data-message-id]'))
-      ? turn
-      : turn.querySelector && turn.querySelector('[data-message-id]')
-        ? turn.querySelector('[data-message-id]')
-        : turn;
-    const identity = getTurnIdentity(turn, source);
-
-    const cachedOnTurn = normalizeUnixTimestampMs(
-      turn.getAttribute && turn.getAttribute('data-ux-create-time-ms')
-    );
-    const cachedIdentityOnTurn =
-      turn.getAttribute && turn.getAttribute('data-ux-create-time-key');
-    if (cachedOnTurn && (!identity || !cachedIdentityOnTurn || cachedIdentityOnTurn === identity)) {
-      return cachedOnTurn;
-    }
-
-    const cachedOnSource =
-      source && source !== turn
-        ? normalizeUnixTimestampMs(source.getAttribute && source.getAttribute('data-ux-create-time-ms'))
-        : null;
-    const cachedIdentityOnSource =
-      source && source !== turn && source.getAttribute
-        ? source.getAttribute('data-ux-create-time-key')
-        : null;
-    if (cachedOnSource && (!identity || !cachedIdentityOnSource || cachedIdentityOnSource === identity)) {
-      if (turn.setAttribute) {
-        turn.setAttribute('data-ux-create-time-ms', String(cachedOnSource));
-        if (identity) turn.setAttribute('data-ux-create-time-key', identity);
-      }
-      return cachedOnSource;
-    }
-
-    const fiber = findReactFiberNode(source) || findReactFiberNode(turn);
-    let timestampMs = extractCreateTimeMsFromFiber(fiber);
-    if (!timestampMs) {
-      timestampMs = extractTimestampFromTimeElement(turn);
-    }
-    if (!timestampMs) return null;
-
-    if (source && source.setAttribute) {
-      source.setAttribute('data-ux-create-time-ms', String(timestampMs));
-      if (identity) source.setAttribute('data-ux-create-time-key', identity);
-    }
-    if (turn !== source && turn && turn.setAttribute) {
-      turn.setAttribute('data-ux-create-time-ms', String(timestampMs));
-      if (identity) turn.setAttribute('data-ux-create-time-key', identity);
-    }
-    return timestampMs;
+    const record = ConversationDataStore.findRecordForTurn(turn);
+    if (record && record.createTimeMs) return record.createTimeMs;
+    return extractTimestampFromTimeElement(turn);
   }
 
   function formatAbsoluteDateTime(timestamp, options = {}) {
@@ -554,6 +406,10 @@
     // recipient "all" with text/multimodal_text content.
     const recipient = message.recipient || 'all';
     if (recipient !== 'all') return false;
+    // Agent/thinking runs emit interim progress notes on the "commentary"
+    // channel; the UI folds them into the "Worked for …" disclosure. Only the
+    // "final" channel (or legacy messages with no channel) is the reply.
+    if (message.channel && message.channel !== 'final') return false;
     const contentType = message.content && message.content.content_type;
     if (contentType && contentType !== 'text' && contentType !== 'multimodal_text') return false;
 
@@ -601,6 +457,7 @@
     let cache = null;
     let pendingFetch = null;
     let accessTokenCache = { token: '', fetchedAt: 0 };
+    const listeners = new Set();
 
     function getOrderedNodes(payload) {
       const mapping = payload && payload.mapping;
@@ -702,9 +559,12 @@
       });
     }
 
+    // The backend answers an unauthenticated conversation GET with 404
+    // ("conversation_inaccessible"), not 401/403, so the bearer token must be
+    // sent up front; a stale token is refreshed once on any auth-shaped status.
     async function fetchConversation(conversationId) {
-      let response = await fetchConversationWithToken(conversationId, accessTokenCache.token);
-      if (response.status === 401 || response.status === 403) {
+      let response = await fetchConversationWithToken(conversationId, await getAccessToken(false));
+      if ([401, 403, 404].includes(response.status)) {
         const accessToken = await getAccessToken(true);
         if (accessToken) {
           response = await fetchConversationWithToken(conversationId, accessToken);
@@ -758,6 +618,7 @@
         .then((payload) => {
           const snapshot = parsePayload(payload, conversationId);
           cache = { conversationId, snapshot, fetchedAt: Date.now(), error: null };
+          listeners.forEach((listener) => listener(snapshot));
           return snapshot;
         })
         .catch((error) => {
@@ -779,9 +640,15 @@
       return list.find((record) => recordMatchesTurn(record, turn)) || null;
     }
 
+    /** Called with every freshly fetched snapshot. */
+    function subscribe(listener) {
+      listeners.add(listener);
+    }
+
     return {
       getCachedSnapshot,
       refresh,
+      subscribe,
       findRecordForTurn,
       getRecordKey
     };
@@ -1036,17 +903,13 @@
     function gatherConversation() {
       const main = getConversationMain();
       if (!main) return { messages: [], attachments: [] };
-      const turns = collectConversationTurns(main)
-        .filter((turn) => isElementVisible(turn) && !isReasoningOnlyTurn(turn));
-      const messages = turns.map((turn, index) => {
+      const messages = getRenderedTurns().map(({ turn, index, role }) => {
         const text = extractMessageTextFromTurn(turn);
         if (!text) return null;
-        const messageNode = (typeof turn.matches === 'function' && turn.matches('[data-message-id]'))
-          ? turn
-          : turn.querySelector('[data-message-id]');
+        const messageNode = turn.matches('[data-message-id]') ? turn : turn.querySelector('[data-message-id]');
         return {
           id: messageNode?.getAttribute('data-message-id') || turn.getAttribute('data-testid') || turn.id || `msg-${index}`,
-          role: determineMessageRole(turn, index),
+          role,
           text
         };
       }).filter(Boolean);
@@ -1212,18 +1075,8 @@
   // License Management (Polar.sh integration)
   // =============================================================================
   const LicenseManager = (function () {
-    const POLAR_ORG_ID = 'f88eadc1-f584-4ae6-a6be-b511e014f825';
-    const FREE_NAVIGATIONS = 30;
     const REVALIDATE_INTERVAL_MS = 86400000;
-    const KEY_PREFIX = 'key_';
-    const BYPASS_LICENSE_KEY = 'DEV_BYPASS';
-    const BYPASS_KEY_ALIASES = new Set([BYPASS_LICENSE_KEY, 'DEV-BYPASS']);
-    const STORAGE_KEYS = {
-      licenseKey: 'promptNavLicenseKey',
-      usageCount: 'promptNavUsageCount',
-      licenseValid: 'promptNavLicenseValid',
-      lastValidated: 'promptNavLastValidated'
-    };
+    const STORAGE_KEYS = LICENSE_STORAGE_KEYS;
 
     async function getUsageCount() {
       return new Promise((resolve) => {
@@ -1261,98 +1114,6 @@
           resolve({ isValid, needsRevalidation });
         });
       });
-    }
-
-    function normalizeLicenseKey(rawKey) {
-      if (typeof rawKey !== 'string') return '';
-      let key = rawKey.trim();
-      if (!key) return '';
-
-      if (/^https?:\/\//i.test(key)) {
-        try {
-          const url = new URL(key);
-          const keyFromUrl = url.searchParams.get('license_key')
-            || url.searchParams.get('licenseKey')
-            || url.searchParams.get('key');
-          if (keyFromUrl) key = keyFromUrl.trim();
-        } catch (e) {
-          // Ignore malformed URLs and fall back to raw input.
-        }
-      }
-
-      return key
-        .replace(/^(license\s*key|license|key)\s*[:=#-]\s*/i, '')
-        .replace(/\s+/g, '');
-    }
-
-    function isBypassLicenseKey(key) {
-      if (!key) return false;
-      return BYPASS_KEY_ALIASES.has(String(key).trim().toUpperCase());
-    }
-
-    function getLicenseCandidates(normalizedKey) {
-      const candidates = [];
-      const seen = new Set();
-      const add = (candidate) => {
-        if (!candidate || seen.has(candidate)) return;
-        seen.add(candidate);
-        candidates.push(candidate);
-      };
-
-      add(normalizedKey);
-      if (normalizedKey.toLowerCase().startsWith(KEY_PREFIX) && normalizedKey.length > KEY_PREFIX.length) {
-        add(normalizedKey.slice(KEY_PREFIX.length));
-      } else {
-        add(`${KEY_PREFIX}${normalizedKey}`);
-      }
-      return candidates;
-    }
-
-    async function validateLicenseWithPolar(rawKey) {
-      const normalizedKey = normalizeLicenseKey(rawKey);
-      if (!normalizedKey) {
-        return { isValid: false, key: '', transientError: false };
-      }
-
-      if (isBypassLicenseKey(normalizedKey)) {
-        return { isValid: true, key: BYPASS_LICENSE_KEY, transientError: false };
-      }
-
-      const candidates = getLicenseCandidates(normalizedKey);
-      let transientError = false;
-      let hadDefinitiveInvalidResponse = false;
-
-      for (const candidate of candidates) {
-        try {
-          const response = await fetch('https://api.polar.sh/v1/customer-portal/license-keys/validate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              key: candidate,
-              organization_id: POLAR_ORG_ID
-            })
-          });
-          if (!response.ok) {
-            if (response.status >= 500 || response.status === 429) {
-              transientError = true;
-            } else {
-              hadDefinitiveInvalidResponse = true;
-            }
-            continue;
-          }
-          const data = await response.json();
-          // API returns a ValidatedLicenseKey object - check status is 'granted'
-          if (data.status === 'granted') {
-            return { isValid: true, key: candidate, transientError: false };
-          }
-          hadDefinitiveInvalidResponse = true;
-        } catch (e) {
-          transientError = true;
-          console.error('License validation error:', e);
-        }
-      }
-
-      return { isValid: false, key: normalizedKey, transientError: transientError && !hadDefinitiveInvalidResponse };
     }
 
     async function checkAndValidateLicense() {
@@ -1466,22 +1227,9 @@
     let dataRefreshTimer = null;
 
     function scan() {
-      const main = getConversationMain();
-      if (!main) {
-        prompts = [];
-        promptRecords = [];
-        return [];
-      }
-      const turns = collectConversationTurns(main);
-      const userPrompts = [];
-      turns.forEach((turn, index) => {
-        if (!isElementVisible(turn)) return;
-        const role = determineMessageRole(turn, index);
-        if (role === 'user') userPrompts.push(turn);
-      });
-      prompts = userPrompts.length === 0 && turns.length > 0
-        ? turns.filter((t) => isElementVisible(t))
-        : userPrompts;
+      const rendered = getRenderedTurns({ includeReasoning: true });
+      const userPrompts = rendered.filter(({ role }) => role === 'user').map(({ turn }) => turn);
+      prompts = userPrompts.length === 0 ? rendered.map(({ turn }) => turn) : userPrompts;
 
       const snapshot = ConversationDataStore.getCachedSnapshot();
       promptRecords = snapshot && snapshot.userMessages && snapshot.userMessages.length
@@ -1658,12 +1406,10 @@
     }
 
     function getMountedPromptObservation(targetIndex, context) {
-      const main = getConversationMain();
-      if (!main || !promptRecords.length) return null;
+      if (!promptRecords.length) return null;
       const thresholdY = context.scrollTop + (context.viewHeight / 2);
       const observations = [];
-      collectConversationTurns(main).forEach((turn) => {
-        if (!isElementVisible(turn) || isReasoningOnlyTurn(turn)) return;
+      getRenderedTurns().forEach(({ turn }) => {
         const record = ConversationDataStore.findRecordForTurn(turn);
         const promptIndex = getPromptIndexForMessageRecord(record);
         if (promptIndex < 0) return;
@@ -2397,19 +2143,10 @@
 
     function styleTurns() {
       if (!enabled) return;
-      const main = getConversationMain();
-      if (!main) return;
-      const turns = collectConversationTurns(main);
-      turns.forEach((turn, index) => {
-        if (!isElementVisible(turn)) return;
-        
-        // Skip if this turn was already processed
+      getRenderedTurns({ includeReasoning: true }).forEach(({ turn, role }) => {
         if (turn.hasAttribute(PROCESSED_ATTR)) return;
-        
-        // Also skip if any child already has the styling class (safety check)
         if (turn.querySelector(`.${MODEL_CLASS}`)) return;
-        
-        const role = determineMessageRole(turn, index);
+
         if (role === 'user') {
           turn.setAttribute(PROCESSED_ATTR, 'user');
           return;
@@ -2499,8 +2236,7 @@
     }
 
     function getConversationId() {
-      const match = location.pathname.match(/\/c\/([a-z0-9-]+)/i);
-      return match ? match[1] : null;
+      return getConversationIdFromLocation();
     }
 
     function getStorageKey() {
@@ -2590,18 +2326,11 @@
     }
 
     function getPromptSnapshot() {
-      // Use PromptNavigator's prompt detection
-      const main = getConversationMain();
-      if (!main) {
-        return { userCount: 0, maxUserTurnIndex: -1, firstUserTimestampMs: null, lastUserTimestampMs: null };
-      }
-      const turns = collectConversationTurns(main);
       let userCount = 0;
       let maxUserTurnIndex = -1;
       let firstUserTimestampMs = null;
       let lastUserTimestampMs = null;
-      turns.forEach((turn, index) => {
-        const role = determineMessageRole(turn, index);
+      getRenderedTurns({ includeReasoning: true }).forEach(({ turn, role }) => {
         if (role !== 'user') return;
 
         userCount++;
@@ -2736,6 +2465,7 @@
     }
 
     function initSession() {
+      ConversationDataStore.refresh().catch(() => {});
       const nextStorageKey = getStorageKey();
       const previousStorageKey = activeStorageKey;
       activeStorageKey = nextStorageKey;
@@ -2783,6 +2513,10 @@
       saveSessionData();
       updateDisplay();
     }
+
+    ConversationDataStore.subscribe(() => {
+      if (enabled) initSession();
+    });
 
     function enable() {
       enabled = true;
@@ -2923,16 +2657,12 @@
       if (!main) return;
 
       const seenMessageNodes = new Set();
-      const turns = collectConversationTurns(main);
-      turns.forEach((turn, index) => {
-        if (!isElementVisible(turn)) return;
-
+      getRenderedTurns({ includeReasoning: true }).forEach(({ turn, role }) => {
         const messageNode = findMessageNode(turn);
         if (!messageNode) return;
         seenMessageNodes.add(messageNode);
 
         const existingTimestamp = findTimestampElement(messageNode);
-        const role = determineMessageRole(turn, index);
         if (role !== 'assistant') {
           if (existingTimestamp) existingTimestamp.remove();
           messageNode.removeAttribute(MESSAGE_MARK_ATTR);
@@ -3007,6 +2737,7 @@
             observedMain = null;
             attachObserverToMain();
             scheduleApply();
+            requestConversationData();
             return;
           }
 
@@ -3042,6 +2773,10 @@
       }
     }
 
+    function requestConversationData() {
+      ConversationDataStore.refresh().catch(() => {});
+    }
+
     function enable() {
       if (enabled) return;
       enabled = true;
@@ -3049,6 +2784,7 @@
       lastObservedUrl = location.href;
       startMonitoring();
       applyTimestamps();
+      requestConversationData();
     }
 
     function disable() {
@@ -3057,6 +2793,10 @@
       stopMonitoring();
       clearTimestamps(document);
     }
+
+    ConversationDataStore.subscribe(() => {
+      if (enabled) scheduleApply();
+    });
 
     function init() {
       enable();
@@ -3385,30 +3125,6 @@
         .cc-delimiter-input::placeholder {
           color: #6e7681;
         }
-        .cc-copy-btn {
-          width: 100%;
-          padding: 10px;
-          font-size: 12px;
-          font-weight: 600;
-          background: linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%);
-          border: none;
-          border-radius: 6px;
-          color: #0d1117;
-          cursor: pointer;
-          transition: all 0.2s ease;
-          margin-top: 10px;
-        }
-        .cc-copy-btn:hover:not(:disabled) {
-          transform: translateY(-1px);
-          box-shadow: 0 4px 12px rgba(45, 212, 191, 0.3);
-        }
-        .cc-copy-btn:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-        .cc-copy-btn.copied {
-          background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
-        }
         .cc-format-section {
           margin-bottom: 10px;
         }
@@ -3568,10 +3284,6 @@
       }
     }
 
-    function isThinkingIndicator(el) {
-      return isReasoningOnlyTurn(el);
-    }
-
     function scanTurns() {
       const main = getConversationMain();
       if (!main) {
@@ -3579,8 +3291,7 @@
         allMessages = [];
         return [];
       }
-      const turns = collectConversationTurns(main);
-      allTurns = turns.filter((t) => isElementVisible(t) && !isThinkingIndicator(t));
+      allTurns = getRenderedTurns().map(({ turn }) => turn);
       const snapshot = ConversationDataStore.getCachedSnapshot();
       if (snapshot && snapshot.messages && snapshot.messages.length) {
         allMessages = snapshot.messages;
@@ -4028,14 +3739,6 @@
       }
     }
 
-    function setFormat(fmt) {
-      currentFormat = fmt;
-      saveFormatPreference(fmt);
-      document.querySelectorAll('.cc-format-btn').forEach((btn) => {
-        btn.classList.toggle('active', btn.dataset.format === fmt);
-      });
-    }
-
     function setDelimiter(delimiter) {
       currentDelimiter = delimiter;
       saveDelimiterPreference(delimiter);
@@ -4094,28 +3797,9 @@
       }
     }
 
-    function formatOutput() {
-      // Use formatOutputAs with current format (for keyboard shortcut)
-      return formatOutputAs(currentFormat);
-    }
-
-    async function copyToClipboard() {
-      const output = formatOutput();
-      if (!output) return;
-      try {
-        await navigator.clipboard.writeText(output);
-        const copyBtn = document.getElementById('cc-copy-btn');
-        if (copyBtn) {
-          copyBtn.textContent = 'Copied!';
-          copyBtn.classList.add('copied');
-          setTimeout(() => {
-            copyBtn.textContent = 'Copy to Clipboard';
-            copyBtn.classList.remove('copied');
-          }, 2000);
-        }
-      } catch (e) {
-        console.error('Failed to copy:', e);
-      }
+    // Ctrl/Cmd+Enter copies in the last-used format.
+    function copyToClipboard() {
+      return copyAs(currentFormat);
     }
 
     function enterSelectionMode() {
@@ -4200,73 +3884,14 @@
     let isGenerating = false;
     let lastCheckTime = 0;
 
-    // Luxurious notification sound using Web Audio API with harmonics
-    function playNotificationSound() {
-      const preset = CHIME_PRESETS[selectedChime] || CHIME_PRESETS[DEFAULT_CHIME];
-      const vol = preset.volume || 0.15;
+    const playNotificationSound = () => playChime(selectedChime);
 
-      try {
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        const now = audioContext.currentTime;
-
-        // Create main oscillator (sine for smooth tone)
-        const osc1 = audioContext.createOscillator();
-        const gain1 = audioContext.createGain();
-        osc1.type = 'sine';
-        osc1.connect(gain1);
-        gain1.connect(audioContext.destination);
-
-        // Add subtle harmonic (one octave up, quieter) for richness
-        const osc2 = audioContext.createOscillator();
-        const gain2 = audioContext.createGain();
-        osc2.type = 'sine';
-        osc2.connect(gain2);
-        gain2.connect(audioContext.destination);
-
-        // First note
-        osc1.frequency.setValueAtTime(preset.note1, now);
-        osc2.frequency.setValueAtTime(preset.note1 * 2, now); // octave harmonic
-
-        // Second note
-        const noteSwitch = now + preset.duration * 0.4;
-        osc1.frequency.setValueAtTime(preset.note2, noteSwitch);
-        osc2.frequency.setValueAtTime(preset.note2 * 2, noteSwitch);
-
-        // Smooth envelope - soft attack, gentle decay (using preset volume)
-        gain1.gain.setValueAtTime(0, now);
-        gain1.gain.linearRampToValueAtTime(vol, now + preset.attack);
-        gain1.gain.exponentialRampToValueAtTime(0.001, now + preset.duration);
-
-        // Harmonic envelope (much quieter for subtle warmth)
-        gain2.gain.setValueAtTime(0, now);
-        gain2.gain.linearRampToValueAtTime(vol * 0.25, now + preset.attack);
-        gain2.gain.exponentialRampToValueAtTime(0.001, now + preset.duration);
-
-        osc1.start(now);
-        osc2.start(now);
-        osc1.stop(now + preset.duration);
-        osc2.stop(now + preset.duration);
-      } catch (e) {
-        console.log('[SoundNotification] Could not play sound:', e);
-      }
-    }
-
+    // ChatGPT swaps the composer's send control for a stop control while a
+    // reply streams; any of these spellings means "still generating".
     function isResponseGenerating() {
-      // Check for the stop button which appears during generation
-      const stopButton = document.querySelector('[data-testid="stop-button"]');
-      if (stopButton) return true;
-
-      // Check for streaming indicator
-      const streamingIndicator = document.querySelector('[data-testid="send-button"][disabled]');
-      if (streamingIndicator) return true;
-
-      // Check for "Stop generating" button text
-      const buttons = document.querySelectorAll('button');
-      for (const btn of buttons) {
-        if (btn.textContent?.includes('Stop generating')) return true;
-      }
-
-      return false;
+      return !!document.querySelector(
+        '[data-testid="stop-button"], [data-testid*="stop-button"], button[aria-label*="stop" i], [data-testid="send-button"][disabled]'
+      );
     }
 
     function checkGenerationState() {
