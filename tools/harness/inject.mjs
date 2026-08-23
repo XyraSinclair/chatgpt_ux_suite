@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 const PORT = process.env.CDP_PORT || 9471;
 const [tabId, extDirArg] = process.argv.slice(2);
-const EXT = extDirArg || '' + new URL('../../chatgpt_ux_suite_extension', import.meta.url).pathname + '';
+const EXT = extDirArg || new URL('../../chatgpt_ux_suite_extension', import.meta.url).pathname;
 const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
 const p = list.find((t) => t.type === 'page' && t.id.startsWith(tabId));
 const sock = new WebSocket(p.webSocketDebuggerUrl);
