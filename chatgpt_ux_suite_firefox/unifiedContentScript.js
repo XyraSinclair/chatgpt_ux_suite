@@ -4,47 +4,63 @@
 (function () {
   'use strict';
 
-  if (window.__chatgptUxSuiteLoaded) {
+  // Run-once guard on the shared DOM: this script may arrive as the
+  // standalone extension's content script and, separately, inside the
+  // universal Scry extension's payload — different JS worlds, one page.
+  if (document.documentElement.hasAttribute('data-chatgpt-ux-suite')) {
     return;
   }
-  window.__chatgptUxSuiteLoaded = true;
+  document.documentElement.setAttribute('data-chatgpt-ux-suite', '1');
 
   // =============================================================================
   // Settings Management
   // =============================================================================
   // DEFAULT_SETTINGS, CHIME_PRESETS and DEFAULT_CHIME are globals from
   // shared.js (loaded first by the manifest).
-  let selectedChime = DEFAULT_CHIME;
+  //
+  // Settings reach the features through one host interface:
+  //   load()        -> Promise<settings>   (DEFAULT_SETTINGS keys + selectedChime)
+  //   onChange(cb)  -> cb(settings) on every change
+  //   onCommand(cb) -> cb(message) for keyboard-command messages (PROMPT_JUMP)
+  // Standalone, the host is chrome.storage.sync + runtime messages. Inside
+  // the Scry payload, `__chatgptUxHost` is declared in the enclosing scope.
+  const host = typeof __chatgptUxHost !== 'undefined' ? __chatgptUxHost : {
+    load: () => new Promise((resolve) => {
+      chrome.storage.sync.get({ ...DEFAULT_SETTINGS, selectedChime: DEFAULT_CHIME }, resolve);
+    }),
+    onChange: (callback) => {
+      chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName !== 'sync') return;
+        const next = { ...currentSettings };
+        Object.keys(changes).forEach((key) => {
+          if (key in next) next[key] = changes[key].newValue;
+        });
+        callback(next);
+      });
+    },
+    onCommand: (callback) => {
+      chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        callback(message);
+        sendResponse({ received: true });
+      });
+    }
+  };
 
-  let currentSettings = { ...DEFAULT_SETTINGS };
+  let selectedChime = DEFAULT_CHIME;
+  let currentSettings = { ...DEFAULT_SETTINGS, selectedChime: DEFAULT_CHIME };
+
+  function adoptSettings(settings) {
+    currentSettings = { ...DEFAULT_SETTINGS, selectedChime: DEFAULT_CHIME, ...settings };
+    selectedChime = currentSettings.selectedChime || DEFAULT_CHIME;
+    return currentSettings;
+  }
 
   async function loadSettings() {
-    return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
-        chrome.storage.sync.get({ ...DEFAULT_SETTINGS, selectedChime: DEFAULT_CHIME }, (result) => {
-          currentSettings = result;
-          selectedChime = result.selectedChime || DEFAULT_CHIME;
-          resolve(result);
-        });
-      } else {
-        resolve(currentSettings);
-      }
-    });
+    return adoptSettings(await host.load());
   }
 
   function onSettingsChanged(callback) {
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
-      chrome.storage.onChanged.addListener((changes, areaName) => {
-        if (areaName === 'sync') {
-          Object.keys(changes).forEach((key) => {
-            if (key in currentSettings) {
-              currentSettings[key] = changes[key].newValue;
-            }
-          });
-          callback(currentSettings);
-        }
-      });
-    }
+    host.onChange((settings) => callback(adoptSettings(settings)));
   }
 
   // =============================================================================
@@ -1530,17 +1546,43 @@
         && !!element.closest('[contenteditable="true"], [role="textbox"]');
     }
 
-    function getShortcutDirection(event) {
-      const key = (event.key || '').toLowerCase();
+    // Shortcuts are strings like "Alt+E" or "Ctrl+Shift+K" (settings
+    // shortcutPrev / shortcutNext). Matching is on event.code for letters
+    // and digits so Alt-modified keys (which change event.key on macOS)
+    // still match. The default Alt combos also accept Ctrl on macOS, where
+    // Alt+letter types a symbol in some layouts.
+    function parseShortcut(spec) {
+      const parts = String(spec || '').split('+').map((p) => p.trim()).filter(Boolean);
+      if (!parts.length) return null;
+      const key = parts.pop().toLowerCase();
+      const mods = new Set(parts.map((p) => p.toLowerCase()));
+      return {
+        key,
+        alt: mods.has('alt') || mods.has('option'),
+        ctrl: mods.has('ctrl') || mods.has('control'),
+        shift: mods.has('shift'),
+        meta: mods.has('meta') || mods.has('cmd') || mods.has('command')
+      };
+    }
+
+    function shortcutMatches(spec, event, allowCtrlAlias) {
+      const s = parseShortcut(spec);
+      if (!s) return false;
       const code = (event.code || '').toLowerCase();
+      const key = (event.key || '').toLowerCase();
+      const keyHit = code === 'key' + s.key || code === 'digit' + s.key || key === s.key;
+      if (!keyHit) return false;
+      if (event.shiftKey !== s.shift || event.metaKey !== s.meta) return false;
+      if (event.altKey === s.alt && event.ctrlKey === s.ctrl) return true;
+      return allowCtrlAlias && s.alt && !s.ctrl && event.ctrlKey && !event.altKey;
+    }
+
+    function getShortcutDirection(event) {
       const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
-      const hasSingleModifier = !event.shiftKey && !event.metaKey && (
-        (event.altKey && !event.ctrlKey) ||
-        (isMac && event.ctrlKey && !event.altKey)
-      );
-      if (!hasSingleModifier) return null;
-      if (code === 'keye' || key === 'e') return 'previous';
-      if (code === 'keyd' || key === 'd') return 'next';
+      const prev = currentSettings.shortcutPrev || DEFAULT_SETTINGS.shortcutPrev;
+      const next = currentSettings.shortcutNext || DEFAULT_SETTINGS.shortcutNext;
+      if (shortcutMatches(prev, event, isMac && prev === DEFAULT_SETTINGS.shortcutPrev)) return 'previous';
+      if (shortcutMatches(next, event, isMac && next === DEFAULT_SETTINGS.shortcutNext)) return 'next';
       return null;
     }
 
@@ -1587,14 +1629,11 @@
         handleJump(direction, 'inline-shortcut');
       }, { capture: true });
 
-      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
-        chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-          if (msg.type === 'PROMPT_JUMP' && enabled) {
-            handleJump(msg.direction, 'extension-command');
-            sendResponse({ received: true });
-          }
-        });
-      }
+      host.onCommand((msg) => {
+        if (msg && msg.type === 'PROMPT_JUMP' && enabled) {
+          handleJump(msg.direction, 'extension-command');
+        }
+      });
     }
 
     function setupObservers() {
@@ -3542,7 +3581,7 @@
     if (currentSettings.soundNotification) SoundNotification.init();
     else SoundNotification.disable();
 
-    // Listen for live settings changes
+    // Live settings changes (popup toggles, synced storage, Scry config).
     onSettingsChanged((settings) => {
       TokenCounter.setEnabled(settings.tokenCounter);
       PromptNavigator.setEnabled(settings.promptNavigator);
@@ -3553,29 +3592,14 @@
       updateSessionTrackerVisibility();
     });
 
-    // Listen for messages from popup
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
-      chrome.runtime.onMessage.addListener((message) => {
-        if (message.type === 'SETTINGS_CHANGED') {
-          if (message.feature === 'tokenCounter') TokenCounter.setEnabled(message.enabled);
-          if (message.feature === 'promptNavigator') {
-            PromptNavigator.setEnabled(message.enabled);
-            updateSessionTrackerVisibility(); // Session tracker depends on this
-          }
-          if (message.feature === 'responseStyling') ResponseStyling.setEnabled(message.enabled);
-          if (message.feature === 'sessionTracker') updateSessionTrackerVisibility();
-          if (message.feature === 'contextCollector') ContextCollector.setEnabled(message.enabled);
-          if (message.feature === 'chatTimestamps') ChatTimestamps.setEnabled(message.enabled);
-          if (message.feature === 'soundNotification') {
-            SoundNotification.setEnabled(message.enabled);
-            if (message.enabled) SoundNotification.playNotificationSound();
-          }
-        }
-        if (message.type === 'CHIME_CHANGED' && message.chime) {
-          selectedChime = message.chime;
-        }
-      });
-    }
+    // Popup nicety: hear the chime when it is switched on or changed.
+    host.onCommand((message) => {
+      if (!message) return;
+      const preview = (message.type === 'SETTINGS_CHANGED' && message.feature === 'soundNotification' && message.enabled)
+        || (message.type === 'CHIME_CHANGED' && message.chime);
+      if (message.type === 'CHIME_CHANGED' && message.chime) selectedChime = message.chime;
+      if (preview) SoundNotification.playNotificationSound();
+    });
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') {

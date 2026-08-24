@@ -70,6 +70,10 @@ Tip: Keyboard shortcuts can be customized in Chrome at `chrome://extensions/shor
 
 ## Version Notes
 
+### 1.1.1 (2026-08-23)
+- Internals: the content script reads settings through one small host interface (standalone: `chrome.storage.sync`; inside the universal Scry extension: its config), so the same source runs in both. A DOM-level run-once guard keeps the two from double-mounting on one page.
+- Prompt-navigation shortcuts are settings (`shortcutPrev` / `shortcutNext`, default `Alt+E` / `Alt+D`; strings like `Ctrl+Shift+K`).
+
 ### 1.1.0 (2026-08-23)
 - Removed the paid tier: Rapid Prompt Navigation is now unlimited and free for everyone. The license UI, usage counter, upgrade modal, and the `api.polar.sh` host permission are gone; leftover license storage is cleared on update.
 

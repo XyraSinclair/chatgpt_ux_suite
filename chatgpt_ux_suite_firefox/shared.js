@@ -11,7 +11,9 @@ const DEFAULT_SETTINGS = {
   sessionTracker: true,
   contextCollector: true,
   chatTimestamps: false,
-  soundNotification: false
+  soundNotification: false,
+  shortcutPrev: 'Alt+E',
+  shortcutNext: 'Alt+D'
 };
 
 // Chime presets: low frequencies, consonant intervals, reduced volume.
