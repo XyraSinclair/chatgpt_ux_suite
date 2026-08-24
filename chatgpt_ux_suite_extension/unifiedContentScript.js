@@ -1570,7 +1570,7 @@
       if (!s) return false;
       const code = (event.code || '').toLowerCase();
       const key = (event.key || '').toLowerCase();
-      const keyHit = code === 'key' + s.key || code === 'digit' + s.key || key === s.key;
+      const keyHit = code === 'key' + s.key || code === 'digit' + s.key || code === s.key || key === s.key;
       if (!keyHit) return false;
       if (event.shiftKey !== s.shift || event.metaKey !== s.meta) return false;
       if (event.altKey === s.alt && event.ctrlKey === s.ctrl) return true;
