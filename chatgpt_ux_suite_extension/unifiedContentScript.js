@@ -82,7 +82,28 @@
     return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
   }
 
+  // ChatGPT's per-message markup. Since 2026-11 each message is a search unit whose key ends in
+  // ":user" / ":assistant" and whose ids attribute leads with the message id; the older
+  // data-message-id / data-message-author-role / conversation-turn markup stays as fallback.
+  const MESSAGE_UNIT_SELECTOR = '[data-chatgpt-search-unit-key]';
+  const MESSAGE_ID_SELECTOR = '[data-message-id], [data-chatgpt-search-message-ids]';
+
+  function messageIdOf(el) {
+    if (!el || typeof el.getAttribute !== 'function') return null;
+    return (
+      el.getAttribute('data-message-id') ||
+      (el.getAttribute('data-chatgpt-search-message-ids') || '').trim().split(/\s+/)[0] ||
+      null
+    );
+  }
+
+  function findMessageIdNode(turn) {
+    if (!turn || typeof turn.matches !== 'function') return null;
+    return turn.matches(MESSAGE_ID_SELECTOR) ? turn : turn.querySelector(MESSAGE_ID_SELECTOR);
+  }
+
   const CONVERSATION_TURN_SELECTORS = [
+    MESSAGE_UNIT_SELECTOR,
     '[data-testid^="conversation-turn"]',
     '[data-testid*="conversation-turn"]',
     '[data-message-author-role]',
@@ -101,6 +122,9 @@
   ];
 
   function determineMessageRole(el, index) {
+    const unitRole = (el.getAttribute('data-chatgpt-search-unit-key') || '').match(/:(user|assistant)$/);
+    if (unitRole) return unitRole[1];
+
     const roleAttr = el.getAttribute('data-message-author-role') || el.dataset?.messageAuthorRole;
     if (roleAttr) return roleAttr;
 
@@ -123,6 +147,7 @@
   function getConversationTurnContainer(node) {
     if (!node || typeof node.closest !== 'function') return null;
     return (
+      node.closest(MESSAGE_UNIT_SELECTOR) ||
       node.closest('[data-testid^="conversation-turn"]') ||
       node.closest('[data-testid*="conversation-turn"]') ||
       node.closest('article') ||
@@ -305,17 +330,14 @@
     };
 
     if (typeof turn.getAttribute === 'function') {
-      add(turn.getAttribute('data-message-id'));
+      add(messageIdOf(turn));
       add(turn.getAttribute('data-testid'));
       add(turn.id);
     }
 
-    const messageNode =
-      typeof turn.matches === 'function' && turn.matches('[data-message-id]')
-        ? turn
-        : turn.querySelector && turn.querySelector('[data-message-id]');
-    if (messageNode && typeof messageNode.getAttribute === 'function') {
-      add(messageNode.getAttribute('data-message-id'));
+    const messageNode = findMessageIdNode(turn);
+    if (messageNode) {
+      add(messageIdOf(messageNode));
       add(messageNode.id);
     }
 
@@ -467,9 +489,24 @@
   }
 
   const ConversationDataStore = (() => {
-    const CACHE_TTL_MS = 30000;
+    // The one source of the conversation's exact text, ids, and times for
+    // every feature below. The backend is asked only when the page shows
+    // something the cache does not — a different conversation, or a new or
+    // regenerated message once streaming has stopped — only in a visible
+    // tab, never within a minute of the extension's previous ChatGPT
+    // backend call (one clock in localStorage, shared across tabs and with
+    // the vault sync), and never while a 429 has the extension parked.
+    // Every other call is answered from the cache, so the features' timers
+    // and observers cost nothing (operator 2026-09-09: "one a minute,
+    // tops"; until 2026-10-11 this store re-fetched every 30 s per tab).
     const FETCH_RETRY_MS = 120000;
     const ACCESS_TOKEN_TTL_MS = 300000;
+    const CALL_GAP_MS = 60000;
+    const PARK_MIN_MS = 10 * 60000;
+    const PARK_MAX_MS = 60 * 60000;
+    const PACE_KEY = 'scry.chatgpt.lastCallAt';
+    const PARK_KEY = 'scry.chatgpt.pausedUntil';
+    const PARK_MS_KEY = 'scry.chatgpt.pauseMs';
     let cache = null;
     let pendingFetch = null;
     let accessTokenCache = { token: '', fetchedAt: 0 };
@@ -586,10 +623,29 @@
           response = await fetchConversationWithToken(conversationId, accessToken);
         }
       }
+      if (response.status === 429) park(Number(response.headers.get('retry-after')) * 1000);
       if (!response.ok) {
         throw new Error(`Conversation fetch failed: ${response.status}`);
       }
+      localStorage.removeItem(PARK_MS_KEY);
       return response.json();
+    }
+
+    function renderedSignature() {
+      const nodes = document.querySelectorAll(MESSAGE_ID_SELECTOR);
+      return nodes.length ? `${nodes.length}:${messageIdOf(nodes[nodes.length - 1])}` : '';
+    }
+    function streaming() { return !!document.querySelector('[data-testid="stop-button"]'); }
+    function parkedUntil() { return Number(localStorage.getItem(PARK_KEY)) || 0; }
+    function slotOpen() { return Date.now() - (Number(localStorage.getItem(PACE_KEY)) || 0) >= CALL_GAP_MS; }
+    function takeSlot() { localStorage.setItem(PACE_KEY, String(Date.now())); }
+    // A 429 parks every ChatGPT backend call the extension makes for 10 min,
+    // doubling to an hour while they keep coming.
+    function park(retryAfterMs) {
+      const last = Number(localStorage.getItem(PARK_MS_KEY)) || 0;
+      const pause = Math.max(retryAfterMs || 0, Math.min(last ? last * 2 : PARK_MIN_MS, PARK_MAX_MS));
+      localStorage.setItem(PARK_MS_KEY, String(pause));
+      localStorage.setItem(PARK_KEY, String(Date.now() + pause));
     }
 
     function getCachedSnapshot() {
@@ -598,48 +654,35 @@
       return cache.snapshot || null;
     }
 
-    async function refresh(options = {}) {
+    async function refresh() {
       const conversationId = getConversationIdFromLocation();
       if (!conversationId) {
         cache = null;
         return null;
       }
-
-      const now = Date.now();
-      if (
-        !options.force &&
-        cache &&
-        cache.conversationId === conversationId &&
-        cache.snapshot &&
-        now - cache.fetchedAt < CACHE_TTL_MS
-      ) {
-        return cache.snapshot;
-      }
-
-      if (
-        !options.force &&
-        cache &&
-        cache.conversationId === conversationId &&
-        cache.error &&
-        now - cache.fetchedAt < FETCH_RETRY_MS
-      ) {
-        return cache.snapshot;
-      }
-
+      const cached = cache && cache.conversationId === conversationId ? cache : null;
       if (pendingFetch && pendingFetch.conversationId === conversationId) {
         return pendingFetch.promise;
       }
+      const signature = renderedSignature();
+      if (!signature) return cached ? cached.snapshot : null; // nothing rendered yet: wait for the page
+      if (cached && cached.signature === signature) return cached.snapshot;
+      if (cached && cached.error && Date.now() - cached.fetchedAt < FETCH_RETRY_MS) return cached.snapshot;
+      if (document.visibilityState !== 'visible' || streaming() || parkedUntil() > Date.now() || !slotOpen()) {
+        return cached ? cached.snapshot : null;
+      }
 
+      takeSlot();
       const promise = fetchConversation(conversationId)
         .then((payload) => {
           const snapshot = parsePayload(payload, conversationId);
-          cache = { conversationId, snapshot, fetchedAt: Date.now(), error: null };
+          cache = { conversationId, snapshot, fetchedAt: Date.now(), error: null, signature };
           listeners.forEach((listener) => listener(snapshot));
           return snapshot;
         })
         .catch((error) => {
           console.warn('ChatGPT UX Suite: full conversation fetch unavailable; falling back to rendered messages.', error);
-          cache = { conversationId, snapshot: cache && cache.conversationId === conversationId ? cache.snapshot : null, fetchedAt: Date.now(), error };
+          cache = { conversationId, snapshot: cached ? cached.snapshot : null, fetchedAt: Date.now(), error, signature: null };
           return cache.snapshot;
         })
         .finally(() => {
@@ -922,9 +965,8 @@
       const messages = getRenderedTurns().map(({ turn, index, role }) => {
         const text = extractMessageTextFromTurn(turn);
         if (!text) return null;
-        const messageNode = turn.matches('[data-message-id]') ? turn : turn.querySelector('[data-message-id]');
         return {
-          id: messageNode?.getAttribute('data-message-id') || turn.getAttribute('data-testid') || turn.id || `msg-${index}`,
+          id: messageIdOf(findMessageIdNode(turn)) || turn.getAttribute('data-testid') || turn.id || `msg-${index}`,
           role,
           text
         };
@@ -1117,8 +1159,8 @@
       return prompts;
     }
 
-    async function refreshConversationData(options = {}) {
-      const snapshot = await ConversationDataStore.refresh(options);
+    async function refreshConversationData() {
+      const snapshot = await ConversationDataStore.refresh();
       if (snapshot && snapshot.userMessages) {
         promptRecords = snapshot.userMessages;
       }
@@ -1131,7 +1173,7 @@
       if (dataRefreshTimer) clearTimeout(dataRefreshTimer);
       dataRefreshTimer = setTimeout(() => {
         dataRefreshTimer = null;
-        refreshConversationData({ force }).catch((error) => {
+        refreshConversationData().catch((error) => {
           console.warn('PromptNav conversation refresh failed:', error);
         });
       }, force ? 50 : 500);
@@ -1602,7 +1644,7 @@
       try {
         scan();
         if (!promptRecords.length) {
-          await refreshConversationData({ force: false });
+          await refreshConversationData();
         }
         const result = await jump(direction);
         if (result.success) {
@@ -1746,7 +1788,7 @@
         }
         
         // Find the best target element for styling
-        let target = turn.querySelector('[data-message-author-role="assistant"]');
+        let target = turn.querySelector('[data-message-author-role="assistant"], [data-markdown-text-style="assistant-message"]');
         if (!target || target === turn) {
           const childDiv = turn.querySelector('div');
           if (childDiv) {
@@ -2158,7 +2200,7 @@
   // Feature 5: Message Datetimes
   // =============================================================================
   const ChatTimestamps = (function () {
-    const MESSAGE_SELECTOR = 'div[data-message-id]';
+    const MESSAGE_SELECTOR = MESSAGE_ID_SELECTOR;
     const TIMESTAMP_CLASS = 'ux-chat-timestamp-inline';
     const MESSAGE_MARK_ATTR = 'data-ux-chat-timestamp-attached';
     const STYLE_ID = 'chat-timestamps-style';
@@ -2239,7 +2281,7 @@
       scope.querySelectorAll(`.${TIMESTAMP_CLASS}`).forEach((timestampEl) => {
         timestampEl.remove();
       });
-      scope.querySelectorAll(`${MESSAGE_SELECTOR}[${MESSAGE_MARK_ATTR}]`).forEach((messageNode) => {
+      scope.querySelectorAll(`[${MESSAGE_MARK_ATTR}]`).forEach((messageNode) => {
         messageNode.removeAttribute(MESSAGE_MARK_ATTR);
       });
     }
@@ -3020,7 +3062,7 @@
     }
 
     async function ensureFullMessagesLoaded() {
-      const snapshot = await ConversationDataStore.refresh({ force: false });
+      const snapshot = await ConversationDataStore.refresh();
       if (snapshot && snapshot.messages && snapshot.messages.length) {
         scanTurns();
         addCheckboxes();
