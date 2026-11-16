@@ -118,6 +118,8 @@ This creates:
 - `chatgpt_ux_suite_firefox.zip` (Firefox Add-ons)
 
 ### 2) Upload to Chrome Web Store
+- Automated: bump `version` in `manifest.json`, then `CWS_PUBLISHER_ID=… tools/cws-publish.sh` (zips, uploads, submits for review; keyless auth, see the script header)
+- Manual:
 - Developer Dashboard: https://chrome.google.com/webstore/devconsole
 - Select **ChatGPT UX Suite**
 - Open the **Package** tab
